@@ -11,6 +11,7 @@
  */
 
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -98,7 +99,7 @@ async function loadGetReplyFromConfig() {
  * to bypass Xiaomi's securityStatus:16 verification.
  */
 async function ensureMiJsonPassToken(account) {
-    const miJsonPath = path.resolve(process.cwd(), ".mi.json");
+    const miJsonPath = path.join(os.homedir(), ".mi.json");
     let store = {};
     try {
         const raw = await fs.readFile(miJsonPath, "utf8");
@@ -163,6 +164,28 @@ async function initMiNA(account) {
     return mina;
 }
 
+/**
+ * Initialize MiIOT service for TTS on newer firmware (e.g. 2.99.99).
+ * Uses miotDID from MiNA device info, or account.miotDid override.
+ * Returns null if unavailable (falls back to MiNA play).
+ */
+async function initMiIOT(account, miotDid) {
+    if (!miotDid) return null;
+    try {
+        await ensureMiJsonPassToken(account);
+        const { getMiIOT } = await import("mi-service-lite");
+        const miiot = await getMiIOT({
+            userId: account.miUser,
+            password: account.miPass,
+            did: miotDid,
+            enableTrace: Boolean(account.enableTrace),
+        });
+        return miiot ?? null;
+    } catch {
+        return null;
+    }
+}
+
 function maskStr(s) {
     if (!s || s.length < 4) return "***";
     return s.slice(0, 2) + "***" + s.slice(-2);
@@ -194,19 +217,79 @@ async function getLastConversation(mina) {
 /**
  * Send TTS text via XiaoAi speaker.
  */
-async function ttsPlay(mina, text) {
+async function ttsPlay(mina, text, miiot) {
+    if (miiot) {
+        const ok = await miiot.doAction(5, 1, [{ text, type: 0 }]);
+        if (ok) return;
+    }
     await mina.play({ tts: text });
 }
 
 /**
  * Pause/stop current XiaoAi response.
  */
-async function ttsPause(mina) {
+async function ttsPause(mina, miiot) {
     try {
-        await mina.pause();
+        if (miiot) {
+            await miiot.doAction(3, 2, []);
+        } else {
+            await mina.pause();
+        }
     } catch {
         // often normal if nothing is playing
     }
+}
+
+/**
+ * Aggressively stop XiaoAi's own response.
+ *
+ * The problem: by the time we detect a new query via polling,
+ * XiaoAi has already started (or even finished) its built-in response.
+ * A single pause is often too late or not effective on TTS responses.
+ *
+ * Key insight: on newer firmware (e.g. LX04 2.99.99), XiaoAi's TTS
+ * runs on a separate audio pipeline from media playback. stop/pause
+ * commands only affect media playback — they do NOT stop TTS.
+ * The only reliable way to interrupt TTS is to **play another TTS**
+ * which takes over the audio output.
+ *
+ * Strategy:
+ *   1. Fire stop + pause in parallel (handles media playback)
+ *   2. Play a silent TTS via both MiIOT doAction AND MiNA play
+ *      to replace whatever XiaoAi is currently saying
+ *   3. Brief wait for the device to process
+ */
+async function forceStopXiaoaiResponse(mina, miiot, log) {
+    // Phase 1: Send stop/pause to handle media playback
+    const stopPromises = [
+        mina.stop().catch(() => {}),
+        mina.pause().catch(() => {}),
+    ];
+    if (miiot) {
+        stopPromises.push(miiot.doAction(3, 2, []).catch(() => {}));
+    }
+    await Promise.allSettled(stopPromises);
+
+    // Phase 2: Play silent TTS to forcefully replace XiaoAi's TTS response.
+    // Use MiIOT (higher priority on newer firmware) AND MiNA as fallback.
+    const ttsPromises = [];
+    if (miiot) {
+        ttsPromises.push(
+            miiot.doAction(5, 1, [{ text: "，", type: 0 }]).catch(() => {})
+        );
+    }
+    ttsPromises.push(mina.play({ tts: "，" }).catch(() => {}));
+    await Promise.allSettled(ttsPromises);
+
+    // Phase 3: Brief wait, then send another stop to silence the comma TTS
+    await sleep(300);
+    await Promise.allSettled([
+        mina.stop().catch(() => {}),
+        mina.pause().catch(() => {}),
+        ...(miiot ? [miiot.doAction(3, 2, []).catch(() => {})] : []),
+    ]);
+
+    log?.debug?.("  已执行打断 (stop+pause+silentTTS+stop)");
 }
 
 /**
@@ -244,14 +327,14 @@ function splitTextForTTS(text, maxLen = 200) {
 /**
  * TTS a long text in segments with estimated wait between chunks.
  */
-async function ttsLongText(mina, text, chunkSize = 200) {
+async function ttsLongText(mina, text, chunkSize = 200, miiot) {
     const chunks = splitTextForTTS(text, chunkSize);
     for (let i = 0; i < chunks.length; i++) {
         if (i > 0) {
             const waitMs = Math.max(chunks[i - 1].length * 200, 2000);
             await sleep(waitMs);
         }
-        await ttsPlay(mina, chunks[i]);
+        await ttsPlay(mina, chunks[i], miiot);
     }
 }
 
@@ -340,7 +423,7 @@ function sanitizeSessionPart(value) {
 /**
  * Process a new user query through OpenClaw agent pipeline.
  */
-async function processInboundQuery(ctx, mina, query, account) {
+async function processInboundQuery(ctx, mina, query, account, miiot) {
     const accountLabel = sanitizeSessionPart(ctx.accountId || "default") || "default";
     const senderId = `xiaoai-user-${accountLabel}`;
     const senderName = `小爱用户(${accountLabel})`;
@@ -379,7 +462,7 @@ async function processInboundQuery(ctx, mina, query, account) {
             typeof account.ttsChunkSize === "number" && Number.isFinite(account.ttsChunkSize)
                 ? account.ttsChunkSize
                 : 200;
-        await ttsLongText(mina, text, chunkSize);
+        await ttsLongText(mina, text, chunkSize, miiot);
     }
 
     return replies.length;
@@ -545,7 +628,9 @@ const xiaoaiChannel = {
 
             // Initialize MiNA and send TTS
             const mina = await initMiNA(account);
-            await ttsLongText(mina, text);
+            const miotDid = account.miotDid || mina.account?.device?.miotDID;
+            const miiot = await initMiIOT(account, miotDid);
+            await ttsLongText(mina, text, undefined, miiot);
             return { ok: true, channel: CHANNEL_ID };
         },
         sendMedia: async ({ cfg, accountId, text, mediaUrl }) => {
@@ -614,6 +699,16 @@ const xiaoaiChannel = {
                 `(${deviceInfo?.hardware ?? ""})`,
             );
 
+            // Initialize MiIOT for firmware that requires doAction for TTS
+            const miotDid = account.miotDid || deviceInfo?.miotDID;
+            let miiot = null;
+            if (miotDid) {
+                miiot = await initMiIOT(account, miotDid);
+                ctx.log?.info?.(
+                    `[${ctx.accountId}] MiIOT: ${miiot ? `✓ 已连接 (did=${miotDid})` : `✗ 不可用 (did=${miotDid})，将回退到 MiNA TTS`}`,
+                );
+            }
+
             // Preflight: load reply handler
             ctx.log?.info?.(`[${ctx.accountId}] 正在加载 OpenClaw reply handler...`);
             await loadGetReplyFromConfig();
@@ -669,8 +764,8 @@ const xiaoaiChannel = {
                                 if (actualQuery) {
                                     // Stop XiaoAi's own response
                                     if (account.stopXiaoaiResponse !== false) {
-                                        await ttsPause(mina);
-                                        await sleep(300);
+                                        ctx.log?.debug?.(`[${ctx.accountId}] 正在打断小爱自带回复...`);
+                                        await forceStopXiaoaiResponse(mina, miiot, ctx.log);
                                     }
 
                                     ctx.log?.info?.(
@@ -684,6 +779,7 @@ const xiaoaiChannel = {
                                             mina,
                                             actualQuery,
                                             account,
+                                            miiot,
                                         );
                                         const elapsed = ((Date.now() - startMs) / 1000).toFixed(1);
                                         ctx.log?.info?.(
@@ -709,7 +805,7 @@ const xiaoaiChannel = {
                                         );
                                         // Inform user via TTS
                                         try {
-                                            await ttsPlay(mina, "抱歉，我现在无法回答，请稍后再试。");
+                                            await ttsPlay(mina, "抱歉，我现在无法回答，请稍后再试。", miiot);
                                         } catch {
                                             // best effort
                                         }
