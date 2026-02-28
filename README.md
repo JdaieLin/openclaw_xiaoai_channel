@@ -32,10 +32,8 @@ openclaw plugins install /path/to/openclaw_xiaoai_channel/xiaoai-channel
         {
           "id": "lx04",
           "enabled": true,
-          "miUser": "你的小米账号",       // 手机号或邮箱
-          "miPass": "你的小米密码",       // 密码
           "did": "小爱触屏音箱",          // 米家App中的设备名称（不是型号！）
-          "passToken": "V1:xxx...",      // 从浏览器获取的 passToken（推荐）
+          "passToken": "V1:xxx...",      // 从浏览器获取的 passToken
           "pollInterval": 1,             // 轮询间隔（秒）
           "stopXiaoaiResponse": true,    // 是否打断小爱自带回复
           "keywordBlacklist": "播放音乐,放首歌,定闹钟,设闹钟,几点了,打开,关闭,音量"
@@ -54,9 +52,9 @@ openclaw plugins install /path/to/openclaw_xiaoai_channel/xiaoai-channel
 
 查看方法：打开米家 App → 找到你的小爱音箱 → 查看设备名称。
 
-#### `passToken` — 认证令牌（推荐）
+#### `passToken` — 认证令牌
 
-由于小米账号登录会触发安全验证（securityStatus: 16），纯密码登录通常无法直接使用。推荐使用 `passToken` 方式认证。
+本插件使用 `passToken` 进行认证，不需要配置小米账号和密码。
 
 获取方法：
 
@@ -65,37 +63,19 @@ openclaw plugins install /path/to/openclaw_xiaoai_channel/xiaoai-channel
 3. 找到 `passToken` 字段，复制其值
 4. 将值填入配置的 `passToken` 字段
 
-> passToken 会在每次登录时自动刷新并保存到 `.mi.json`，首次配置后无需再手动更新。
-
-## 已知问题
-
-### mi-service-lite userId 补丁
-
-本插件依赖一个对 `mi-service-lite` 的补丁：登录成功后必须将 `account.userId` 从手机号更新为小米数字 ID。
-
-**原因**：小米 API 的 serviceToken 绑定于数字 userId（如 `1048096023`），但库不会自动更新 `account.userId`，导致 API Cookie 中的手机号与 serviceToken 不匹配，返回 401。
-
-**补丁**：在 `node_modules/mi-service-lite/dist/index.js` 的 `getAccount()` 函数中，`account = { ...account, pass, serviceToken }` 之后添加：
-
-```javascript
-if (pass.userId) {
-    account.userId = pass.userId.toString();
-}
-```
-
-⚠️ `npm install` 会覆盖此补丁，需要重新应用。
+> 首次使用 passToken 登录后，凭据会缓存到 `~/.mi.json`，后续自动刷新，无需手动更新。
 
 ## 配置项参考
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `id` | string | — | 账号标识 |
+| `label` | string | — | 设备显示名称（如"客厅小爱"） |
 | `enabled` | boolean | true | 是否启用 |
-| `miUser` | string | — | 小米账号（手机号/邮箱） |
-| `miPass` | string | — | 小米密码 |
-| `passToken` | string | — | 浏览器 passToken（推荐） |
+| `passToken` | string | — | 浏览器 passToken |
 | `did` | string | — | 设备名称（米家中显示的名称） |
 | `hardware` | string | LX04 | 设备型号（备用） |
+| `miotDid` | string | — | MiIOT 设备 DID（通常自动获取） |
 | `pollInterval` | number | 1 | 轮询间隔（秒） |
 | `triggerPrefix` | string | — | 触发前缀（如"请问"） |
 | `ttsChunkSize` | number | 200 | TTS 分段字符数 |

@@ -109,7 +109,7 @@ async function ensureMiJsonPassToken(account) {
     }
 
     const passToken = account.passToken;
-    if (!passToken) return; // no passToken configured, rely on password auth
+    if (!passToken) return store; // no passToken configured
 
     // Only write passToken if the stored one is different or missing
     const needsUpdate = (
@@ -131,33 +131,45 @@ async function ensureMiJsonPassToken(account) {
 
         await fs.writeFile(miJsonPath, JSON.stringify(store, null, 2), "utf8");
     }
+
+    return store;
 }
 
 /**
  * Initialize MiNA service for a given account.
  * Returns an MiNA instance or throws.
  *
- * NOTE: Requires a patched mi-service-lite that updates account.userId
- * to the numeric ID from pass.userId after login. Without this patch,
- * the phone-number userId in the API cookie mismatches the serviceToken
- * and causes 401 errors.
+ * Uses passToken + cached credentials from ~/.mi.json for authentication.
+ * The numeric userId (pass.userId) is used instead of phone number to avoid
+ * cookie/serviceToken mismatch causing 401 errors.
  */
 async function initMiNA(account) {
-    // Write passToken to .mi.json if configured
-    await ensureMiJsonPassToken(account);
+    // Write passToken to .mi.json and read cached credentials
+    const store = await ensureMiJsonPassToken(account);
+    const cached = store?.mina || {};
+    // Prefer numeric userId from pass (avoids phone-number mismatch)
+    const userId = cached.pass?.userId || cached.userId || "";
+    const password = cached.password || "";
+
+    if (!userId) {
+        throw new Error(
+            `MiNA 初始化失败: ~/.mi.json 中没有缓存的账号信息。\n` +
+            `请先使用 miUser+miPass 登录一次，之后只需 passToken 即可。`,
+        );
+    }
 
     const { getMiNA } = await import("mi-service-lite");
     const did = account.did || account.hardware || "LX04";
     const mina = await getMiNA({
-        userId: account.miUser,
-        password: account.miPass,
+        userId,
+        password,
         did,
         enableTrace: Boolean(account.enableTrace),
     });
     if (!mina) {
         throw new Error(
-            `MiNA 初始化失败: 请检查小米账号/密码/设备名称/passToken ` +
-            `(user=${maskStr(account.miUser)}, did=${did})\n` +
+            `MiNA 初始化失败: 请检查 passToken 和设备名称 ` +
+            `(did=${did})\n` +
             `提示: did 应为米家中的设备名称(如"小爱触屏音箱")，而非型号(如"LX04")`,
         );
     }
@@ -172,11 +184,14 @@ async function initMiNA(account) {
 async function initMiIOT(account, miotDid) {
     if (!miotDid) return null;
     try {
-        await ensureMiJsonPassToken(account);
+        const store = await ensureMiJsonPassToken(account);
+        const cached = store?.miiot || store?.mina || {};
+        const userId = cached.pass?.userId || cached.userId || "";
+        const password = cached.password || "";
         const { getMiIOT } = await import("mi-service-lite");
         const miiot = await getMiIOT({
-            userId: account.miUser,
-            password: account.miPass,
+            userId,
+            password,
             did: miotDid,
             enableTrace: Boolean(account.enableTrace),
         });
@@ -184,11 +199,6 @@ async function initMiIOT(account, miotDid) {
     } catch {
         return null;
     }
-}
-
-function maskStr(s) {
-    if (!s || s.length < 4) return "***";
-    return s.slice(0, 2) + "***" + s.slice(-2);
 }
 
 /**
@@ -354,17 +364,13 @@ function resolveAccountSection(cfg, accountId) {
             ? accounts[accountKey]
             : {};
 
-    // Inherit shared credentials from channel-level config.
-    // Account-level values take priority over channel-level.
-    const miUser = acct.miUser || section.miUser || "";
-    const miPass = acct.miPass || section.miPass || "";
+    // Inherit shared passToken from channel-level config.
+    // Account-level value takes priority over channel-level.
     const passToken = acct.passToken || section.passToken || "";
 
     return {
         enabled: section?.enabled !== false,
         ...acct,
-        miUser,
-        miPass,
         passToken,
         accountId: accountKey,
         hasAccountSection:
@@ -507,9 +513,7 @@ const xiaoaiChannel = {
             additionalProperties: false,
             properties: {
                 enabled: { type: "boolean" },
-                // Shared credentials — inherited by all accounts, can be overridden per-account
-                miUser: { type: "string", description: "小米账号 (所有设备共享，可在 account 中覆盖)" },
-                miPass: { type: "string", description: "小米密码 (所有设备共享，可在 account 中覆盖)" },
+                // Shared passToken — inherited by all accounts, can be overridden per-account
                 passToken: { type: "string", description: "小米 passToken (所有设备共享，可在 account 中覆盖)" },
                 accounts: {
                     type: "array",
@@ -520,8 +524,6 @@ const xiaoaiChannel = {
                             id: { type: "string", description: "账号标识 (用于 OpenClaw chat 页面区分不同设备)" },
                             label: { type: "string", description: "设备显示名称 (如'客厅小爱'、'卧室小爱')" },
                             enabled: { type: "boolean" },
-                            miUser: { type: "string", description: "小米账号 (不填则继承顶层配置)" },
-                            miPass: { type: "string", description: "小米密码 (不填则继承顶层配置)" },
                             passToken: { type: "string", description: "小米 passToken (不填则继承顶层配置)" },
                             hardware: { type: "string", description: "设备型号 (如 LX04)" },
                             did: { type: "string", description: "设备名称 (米家App中的名称，如'小爱触屏音箱')" },
@@ -561,8 +563,6 @@ const xiaoaiChannel = {
                 accountId: eff.accountId,
                 label: typeof eff?.label === "string" ? eff.label : "",
                 enabled: eff?.enabled !== false,
-                miUser: typeof eff?.miUser === "string" ? eff.miUser : "",
-                miPass: typeof eff?.miPass === "string" ? eff.miPass : "",
                 hardware: typeof eff?.hardware === "string" ? eff.hardware : "LX04",
                 did: typeof eff?.did === "string" ? eff.did : "",
                 miotDid: typeof eff?.miotDid === "string" ? eff.miotDid : "",
@@ -582,15 +582,8 @@ const xiaoaiChannel = {
                         : "播放音乐,放首歌,定闹钟,设闹钟,几点了,打开,关闭,音量",
                 configured:
                     eff?.hasAccountSection === true &&
-                    typeof eff?.miUser === "string" &&
-                    eff.miUser.trim().length > 0 &&
-                    ((
-                        typeof eff?.miPass === "string" &&
-                        eff.miPass.trim().length > 0
-                    ) || (
-                        typeof eff?.passToken === "string" &&
-                        eff.passToken.trim().length > 0
-                    )),
+                    typeof eff?.passToken === "string" &&
+                    eff.passToken.trim().length > 0,
             };
         },
         isConfigured: (account) => Boolean(account?.configured),
@@ -599,8 +592,7 @@ const xiaoaiChannel = {
             label: account?.label || account?.accountId || "default",
             enabled: account?.enabled !== false,
             configured: Boolean(account?.configured),
-            miUser: account?.miUser ? "[set]" : "[missing]",
-            miPass: account?.miPass ? "[set]" : "[missing]",
+            passToken: account?.passToken ? "[set]" : "[missing]",
             hardware: account?.hardware || "LX04",
             did: account?.did || "[auto]",
             pollInterval: account?.pollInterval ?? 1,
@@ -627,10 +619,10 @@ const xiaoaiChannel = {
         deliveryMode: "direct",
         sendText: async ({ cfg, accountId, text }) => {
             const account = resolveAccountSection(cfg, accountId);
-            if (!account.miUser || (!account.miPass && !account.passToken)) {
+            if (!account.passToken) {
                 throw new Error(
-                    `xiaoai account "${accountId}" 未配置小米账号。` +
-                    `请在 channels.xiaoai.accounts 中配置 miUser 和 miPass (或 passToken)。`,
+                    `xiaoai account "${accountId}" 未配置 passToken。` +
+                    `请在 channels.xiaoai.accounts 中配置 passToken。`,
                 );
             }
 
@@ -683,10 +675,10 @@ const xiaoaiChannel = {
         startAccount: async (ctx) => {
             const account = resolveAccountSection(ctx.cfg, ctx.accountId);
 
-            if (!account.miUser || (!account.miPass && !account.passToken)) {
+            if (!account.passToken) {
                 throw new Error(
-                    `xiaoai account "${ctx.accountId}" 未配置。` +
-                    `请在 channels.xiaoai.accounts 中配置 miUser 和 miPass (或 passToken)。`,
+                    `xiaoai account "${ctx.accountId}" 未配置 passToken。` +
+                    `请在 channels.xiaoai.accounts 中配置 passToken。`,
                 );
             }
 

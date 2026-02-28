@@ -13,17 +13,15 @@
  *   node tools.js status                     # 查看设备状态
  *   node tools.js pause                      # 暂停播放
  *
- * 环境变量（也可用 .env 文件或命令行参数）:
- *   MI_USER       小米账号
- *   MI_PASS       小米密码
+ * 环境变量（也可用命令行参数）:
  *   MI_DID        设备名称（米家App中的名称）
- *   MI_PASS_TOKEN passToken（可替代密码）
+ *   MI_PASS_TOKEN passToken
  */
 
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { getMiNA, getMiIOT } from "mi-service-lite";
+import { MiNA, MiIOT, getMiNA, getMiIOT } from "mi-service-lite";
 
 // ─── Utilities ──────────────────────────────────────────────
 
@@ -46,14 +44,12 @@ function printUsage() {
   node tools.js pause [--did <设备名>]           暂停当前播放
   node tools.js test-interrupt [--did <设备名>]  测试打断小爱回复
 
-认证方式 (任选其一):
-  1. 命令行参数:  --user <账号> --pass <密码>
-  2. 命令行参数:  --user <账号> --pass-token <passToken>
-  3. 环境变量:    MI_USER / MI_PASS / MI_PASS_TOKEN
-  4. ~/.mi.json:  之前登录过会自动缓存
+认证方式:
+  命令行参数:  --pass-token <passToken>
+  环境变量:    MI_PASS_TOKEN
 
 示例:
-  node tools.js list --user 13800138000 --pass mypassword
+  node tools.js list --pass-token "V1:xxx..."
   node tools.js tts "今天天气真好" --did "小爱音箱Pro"
   node tools.js volume 50
   node tools.js volume 20 --did "卧室的小爱"
@@ -66,11 +62,7 @@ function parseArgs(argv) {
     let i = 0;
     while (i < argv.length) {
         const arg = argv[i];
-        if (arg === "--user") {
-            args.user = argv[++i];
-        } else if (arg === "--pass") {
-            args.pass = argv[++i];
-        } else if (arg === "--pass-token") {
+        if (arg === "--pass-token") {
             args.passToken = argv[++i];
         } else if (arg === "--did") {
             args.did = argv[++i];
@@ -87,28 +79,23 @@ function parseArgs(argv) {
 }
 
 function getCredentials(args) {
-    const user = args.user || process.env.MI_USER || "";
-    const pass = args.pass || process.env.MI_PASS || "";
     const passToken = args.passToken || process.env.MI_PASS_TOKEN || "";
     const did = args.did || process.env.MI_DID || "";
 
-    if (!user) {
-        console.error("❌ 缺少小米账号。请通过 --user 或 MI_USER 环境变量提供。");
-        console.error("   示例: node tools.js list --user 13800138000 --pass yourpassword");
+    if (!passToken) {
+        console.error("❌ 缺少 passToken。请通过 --pass-token 或 MI_PASS_TOKEN 环境变量提供。");
+        console.error("   示例: node tools.js list --pass-token \"V1:xxx...\"");
         process.exit(1);
     }
-    if (!pass && !passToken) {
-        console.error("❌ 缺少密码或passToken。请通过 --pass / --pass-token 或 MI_PASS / MI_PASS_TOKEN 环境变量提供。");
-        process.exit(1);
-    }
-    return { user, pass, passToken, did, trace: Boolean(args.trace) };
+    return { passToken, did, trace: Boolean(args.trace) };
 }
 
 /**
  * Write passToken to ~/.mi.json for mi-service-lite authentication.
+ * Returns the cached userId from the store, if available.
  */
 async function ensurePassToken(passToken) {
-    if (!passToken) return;
+    if (!passToken) return null;
     const miJsonPath = path.join(os.homedir(), ".mi.json");
     let store = {};
     try {
@@ -135,14 +122,31 @@ async function ensurePassToken(passToken) {
 
         await fs.writeFile(miJsonPath, JSON.stringify(store, null, 2), "utf8");
     }
+
+    // Return cached userId (phone number or numeric ID) for API calls
+    return store.mina?.userId || store.miiot?.userId || null;
 }
 
 async function createMiNA(creds) {
     await ensurePassToken(creds.passToken);
+    // Read cached credentials from ~/.mi.json (written by previous login or ensurePassToken)
+    const miJsonPath = path.join(os.homedir(), ".mi.json");
+    let store = {};
+    try {
+        store = JSON.parse(await fs.readFile(miJsonPath, "utf8")) || {};
+    } catch { /* empty */ }
+    const account = store.mina || {};
+    // Use numeric userId from pass (more reliable than phone-number userId)
+    const userId = account.pass?.userId || account.userId || "";
+    const password = account.password || "";
+    if (!userId) {
+        console.error("❌ ~/.mi.json 中没有缓存的账号信息。请先用 miUser+miPass 登录一次（通过 OpenClaw 配置）。");
+        process.exit(1);
+    }
     const mina = await getMiNA({
-        userId: creds.user,
-        password: creds.pass,
-        did: creds.did || undefined,
+        userId,
+        password,
+        did: creds.did || account.did || undefined,
         enableTrace: creds.trace,
     });
     if (!mina) {
@@ -156,9 +160,17 @@ async function createMiIOT(creds, miotDid) {
     if (!miotDid) return null;
     try {
         await ensurePassToken(creds.passToken);
+        const miJsonPath = path.join(os.homedir(), ".mi.json");
+        let store = {};
+        try {
+            store = JSON.parse(await fs.readFile(miJsonPath, "utf8")) || {};
+        } catch { /* empty */ }
+        const account = store.miiot || {};
+        const userId = account.pass?.userId || account.userId || store.mina?.pass?.userId || store.mina?.userId || "";
+        const password = account.password || store.mina?.password || "";
         const miiot = await getMiIOT({
-            userId: creds.user,
-            password: creds.pass,
+            userId,
+            password,
             did: miotDid,
             enableTrace: creds.trace,
         });
@@ -168,10 +180,7 @@ async function createMiIOT(creds, miotDid) {
     }
 }
 
-function maskStr(s) {
-    if (!s || s.length < 4) return "***";
-    return s.slice(0, 2) + "***" + s.slice(-2);
-}
+
 
 // ─── Commands ───────────────────────────────────────────────
 
