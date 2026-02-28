@@ -245,51 +245,39 @@ async function ttsPause(mina, miiot) {
  *
  * The problem: by the time we detect a new query via polling,
  * XiaoAi has already started (or even finished) its built-in response.
- * A single pause is often too late or not effective on TTS responses.
  *
- * Key insight: on newer firmware (e.g. LX04 2.99.99), XiaoAi's TTS
- * runs on a separate audio pipeline from media playback. stop/pause
- * commands only affect media playback — they do NOT stop TTS.
- * The only reliable way to interrupt TTS is to **play another TTS**
- * which takes over the audio output.
+ * Key insight (tested on LX04 firmware 2.99.99):
+ *   - XiaoAi's built-in response uses the MiNA TTS channel
+ *   - MiNA TTS CANNOT override another MiNA TTS (sending a new one is ignored)
+ *   - MiIOT doAction(5,1) CAN override MiNA TTS (different audio pipeline)
+ *   - stop/pause only affect media playback, NOT TTS
  *
- * Strategy:
- *   1. Fire stop + pause in parallel (handles media playback)
- *   2. Play a silent TTS via both MiIOT doAction AND MiNA play
- *      to replace whatever XiaoAi is currently saying
- *   3. Brief wait for the device to process
+ * Therefore the ONLY reliable way to interrupt XiaoAi's response is
+ * to send a MiIOT doAction(5,1) with a silent/minimal text.
+ *
+ * NOTE: On firmware 2.99.99, all TTS calls (MiNA and MiIOT) prepend/append
+ * the word "test". This is a firmware-level debug marker and cannot be
+ * avoided through software.
  */
 async function forceStopXiaoaiResponse(mina, miiot, log) {
-    // Phase 1: Send stop/pause to handle media playback
-    const stopPromises = [
-        mina.stop().catch(() => {}),
-        mina.pause().catch(() => {}),
-    ];
     if (miiot) {
-        stopPromises.push(miiot.doAction(3, 2, []).catch(() => {}));
+        // MiIOT doAction is the only method that can override MiNA TTS.
+        // Send a silent comma to replace XiaoAi's current response.
+        log?.debug?.("  打断: 使用 MiIOT doAction 覆盖小爱回复...");
+        await miiot.doAction(5, 1, [{ text: "，", type: 0 }]).catch(() => {});
+        // Brief pause then stop the comma TTS
+        await sleep(200);
+        await miiot.doAction(3, 2, []).catch(() => {});
+    } else {
+        // Fallback without MiIOT: try stop/pause (less reliable for TTS)
+        log?.debug?.("  打断: 无 MiIOT, 回退到 stop+pause...");
+        await Promise.allSettled([
+            mina.stop().catch(() => {}),
+            mina.pause().catch(() => {}),
+        ]);
     }
-    await Promise.allSettled(stopPromises);
 
-    // Phase 2: Play silent TTS to forcefully replace XiaoAi's TTS response.
-    // Use MiIOT (higher priority on newer firmware) AND MiNA as fallback.
-    const ttsPromises = [];
-    if (miiot) {
-        ttsPromises.push(
-            miiot.doAction(5, 1, [{ text: "，", type: 0 }]).catch(() => {})
-        );
-    }
-    ttsPromises.push(mina.play({ tts: "，" }).catch(() => {}));
-    await Promise.allSettled(ttsPromises);
-
-    // Phase 3: Brief wait, then send another stop to silence the comma TTS
-    await sleep(300);
-    await Promise.allSettled([
-        mina.stop().catch(() => {}),
-        mina.pause().catch(() => {}),
-        ...(miiot ? [miiot.doAction(3, 2, []).catch(() => {})] : []),
-    ]);
-
-    log?.debug?.("  已执行打断 (stop+pause+silentTTS+stop)");
+    log?.debug?.("  打断命令已发送");
 }
 
 /**

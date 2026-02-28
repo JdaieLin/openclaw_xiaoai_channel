@@ -403,38 +403,31 @@ async function cmdTestInterrupt(creds) {
     await sleep(3000);
 
     // Step 3: Interrupt using same strategy as forceStopXiaoaiResponse
+    // Key discovery: MiNA TTS CANNOT override MiNA TTS, but MiIOT doAction CAN.
+    // XiaoAi's built-in response uses MiNA TTS channel.
     console.log(`\n🛑 Step 3: 执行打断...`);
     const startMs = Date.now();
 
-    // Phase 1: stop + pause
-    console.log(`   Phase 1: 发送 stop + pause...`);
-    const stopPromises = [
-        mina.stop().catch(() => {}),
-        mina.pause().catch(() => {}),
-    ];
-    if (miiot) stopPromises.push(miiot.doAction(3, 2, []).catch(() => {}));
-    await Promise.allSettled(stopPromises);
-    console.log(`   Phase 1 完成 (${Date.now() - startMs}ms)`);
-
-    // Phase 2: Play silent TTS to replace XiaoAi's TTS
-    console.log(`   Phase 2: 播放静音TTS覆盖...`);
-    const ttsPromises = [];
     if (miiot) {
-        ttsPromises.push(miiot.doAction(5, 1, [{ text: "，", type: 0 }]).catch(() => {}));
-    }
-    ttsPromises.push(mina.play({ tts: "，" }).catch(() => {}));
-    await Promise.allSettled(ttsPromises);
-    console.log(`   Phase 2 完成 (${Date.now() - startMs}ms)`);
+        // Use MiIOT doAction to override the MiNA TTS (different audio pipeline)
+        console.log(`   使用 MiIOT doAction 覆盖 MiNA TTS...`);
+        await miiot.doAction(5, 1, [{ text: "，", type: 0 }]).catch(() => {});
+        console.log(`   MiIOT 覆盖已发送 (${Date.now() - startMs}ms)`);
 
-    // Phase 3: Wait then stop again to silence the comma
-    await sleep(300);
-    console.log(`   Phase 3: 再次 stop + pause...`);
-    await Promise.allSettled([
-        mina.stop().catch(() => {}),
-        mina.pause().catch(() => {}),
-        ...(miiot ? [miiot.doAction(3, 2, []).catch(() => {})] : []),
-    ]);
-    console.log(`   Phase 3 完成 (${Date.now() - startMs}ms)`);
+        // Brief pause then stop the comma TTS
+        await sleep(200);
+        console.log(`   发送 MiIOT stop...`);
+        await miiot.doAction(3, 2, []).catch(() => {});
+        console.log(`   MiIOT stop 完成 (${Date.now() - startMs}ms)`);
+    } else {
+        // Fallback without MiIOT: try stop/pause (less reliable for TTS)
+        console.log(`   ⚠️ 无 MiIOT, 回退到 stop+pause (可能无法打断TTS)...`);
+        await Promise.allSettled([
+            mina.stop().catch(() => {}),
+            mina.pause().catch(() => {}),
+        ]);
+        console.log(`   stop+pause 完成 (${Date.now() - startMs}ms)`);
+    }
 
     const elapsed = Date.now() - startMs;
     console.log(`\n✅ 打断命令已全部发送 (总耗时 ${elapsed}ms)`);
