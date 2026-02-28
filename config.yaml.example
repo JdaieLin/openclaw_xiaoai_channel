@@ -1,0 +1,37 @@
+# ===== 小米账号 =====
+xiaomi:
+  # 小米账号（手机号或邮箱）
+  username: ""
+  # 小米账号密码
+  password: ""
+  # 设备硬件型号，LX04 为小爱触屏音箱
+  hardware: "LX04"
+  # 设备DID，留空自动检测；多设备时建议指定
+  did: ""
+
+# ===== OpenClaw 配置 =====
+openclaw:
+  # OpenClaw API 地址
+  api_url: "http://localhost:8000"
+  # OpenClaw API Key
+  api_key: ""
+  # 模型名称
+  model: "default"
+  # 系统提示词
+  system_prompt: "你是一个智能助手，正在通过小爱同学音箱与用户对话。请尽量简洁地回答用户的问题。"
+
+# ===== Channel 配置 =====
+channel:
+  # 轮询间隔（秒）
+  poll_interval: 1.0
+  # 触发前缀，留空表示所有对话都转发给OpenClaw
+  # 例如设为"请问"，则用户说"小爱同学，请问xxx"才会转发
+  trigger_prefix: ""
+  # 最大对话历史轮数
+  max_history: 20
+  # TTS分段长度（字符数）
+  tts_chunk_size: 200
+  # 是否在转发前停止小爱自带回复
+  stop_xiaoai_response: true
+  # 关键词黑名单，包含这些词的查询不会转发（逗号分隔）
+  keyword_blacklist: "播放音乐,放首歌,定闹钟,设闹钟,几点了,打开,关闭,音量"

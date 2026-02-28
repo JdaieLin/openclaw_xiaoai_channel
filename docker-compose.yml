@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  openclaw-xiaoai:
+    build: .
+    container_name: openclaw-xiaoai-channel
+    restart: unless-stopped
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Shanghai
+    # 如果 OpenClaw 也在 docker 中运行，可以加入同一网络
+    # networks:
+    #   - openclaw-network
+
+# networks:
+#   openclaw-network:
+#     external: true

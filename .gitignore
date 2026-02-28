@@ -1,1 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Config (contains secrets)
+config.yaml
+.env
+
+# OS
 .DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Mi service token cache
+.mi.json
+.mi.token
+
+# Package lock is committed, but ignore if using yarn/pnpm
+yarn.lock
+pnpm-lock.yaml
