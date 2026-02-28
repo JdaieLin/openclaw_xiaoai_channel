@@ -1,0 +1,23 @@
+{
+  "name": "xiaoai-channel",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "mi-service-lite": "^2.0.0"
+  },
+  "openclaw": {
+    "extensions": ["./index.js"],
+    "channel": {
+      "id": "xiaoai",
+      "label": "XiaoAi",
+      "selectionLabel": "XiaoAi (小爱同学 Smart Speaker)",
+      "docsPath": "/channels/xiaoai",
+      "blurb": "小爱同学智能音箱桥接通道，通过小米云服务 API 实现语音对话转发。",
+      "aliases": ["xiaoai", "xiaomi", "miai"]
+    },
+    "install": {
+      "localPath": "xiaoai-channel"
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "id": "xiaoai-channel",
+  "channels": ["xiaoai"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
