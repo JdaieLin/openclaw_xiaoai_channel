@@ -365,9 +365,19 @@ function resolveAccountSection(cfg, accountId) {
         accounts[accountKey] && typeof accounts[accountKey] === "object"
             ? accounts[accountKey]
             : {};
+
+    // Inherit shared credentials from channel-level config.
+    // Account-level values take priority over channel-level.
+    const miUser = acct.miUser || section.miUser || "";
+    const miPass = acct.miPass || section.miPass || "";
+    const passToken = acct.passToken || section.passToken || "";
+
     return {
         enabled: section?.enabled !== false,
         ...acct,
+        miUser,
+        miPass,
+        passToken,
         accountId: accountKey,
         hasAccountSection:
             Boolean(acct && typeof acct === "object" && Object.keys(acct).length > 0),
@@ -426,7 +436,8 @@ function sanitizeSessionPart(value) {
 async function processInboundQuery(ctx, mina, query, account, miiot) {
     const accountLabel = sanitizeSessionPart(ctx.accountId || "default") || "default";
     const senderId = `xiaoai-user-${accountLabel}`;
-    const senderName = `小爱用户(${accountLabel})`;
+    const displayLabel = account.label || accountLabel;
+    const senderName = `小爱用户(${displayLabel})`;
     const sessionKey = `agent:main:${CHANNEL_ID}:${accountLabel}:direct:${senderId}`;
 
     const inboundCtx = {
@@ -508,19 +519,25 @@ const xiaoaiChannel = {
             additionalProperties: false,
             properties: {
                 enabled: { type: "boolean" },
+                // Shared credentials — inherited by all accounts, can be overridden per-account
+                miUser: { type: "string", description: "小米账号 (所有设备共享，可在 account 中覆盖)" },
+                miPass: { type: "string", description: "小米密码 (所有设备共享，可在 account 中覆盖)" },
+                passToken: { type: "string", description: "小米 passToken (所有设备共享，可在 account 中覆盖)" },
                 accounts: {
                     type: "array",
                     items: {
                         type: "object",
                         additionalProperties: false,
                         properties: {
-                            id: { type: "string", description: "账号标识" },
+                            id: { type: "string", description: "账号标识 (用于 OpenClaw chat 页面区分不同设备)" },
+                            label: { type: "string", description: "设备显示名称 (如'客厅小爱'、'卧室小爱')" },
                             enabled: { type: "boolean" },
-                            miUser: { type: "string", description: "小米账号" },
-                            miPass: { type: "string", description: "小米密码" },
+                            miUser: { type: "string", description: "小米账号 (不填则继承顶层配置)" },
+                            miPass: { type: "string", description: "小米密码 (不填则继承顶层配置)" },
+                            passToken: { type: "string", description: "小米 passToken (不填则继承顶层配置)" },
                             hardware: { type: "string", description: "设备型号 (如 LX04)" },
                             did: { type: "string", description: "设备名称 (米家App中的名称，如'小爱触屏音箱')" },
-                            passToken: { type: "string", description: "小米 passToken (从浏览器Cookie获取，替代密码登录)" },
+                            miotDid: { type: "string", description: "MiIOT 设备 DID (通常自动获取，无需手动填写)" },
                             enableTrace: { type: "boolean", description: "启用 mi-service-lite 调试日志" },
                             pollInterval: { type: "number", description: "轮询间隔秒数" },
                             triggerPrefix: { type: "string", description: "触发前缀 (如'请问')" },
@@ -554,11 +571,13 @@ const xiaoaiChannel = {
             const eff = resolveAccountSection(cfg, accountId);
             return {
                 accountId: eff.accountId,
+                label: typeof eff?.label === "string" ? eff.label : "",
                 enabled: eff?.enabled !== false,
                 miUser: typeof eff?.miUser === "string" ? eff.miUser : "",
                 miPass: typeof eff?.miPass === "string" ? eff.miPass : "",
                 hardware: typeof eff?.hardware === "string" ? eff.hardware : "LX04",
                 did: typeof eff?.did === "string" ? eff.did : "",
+                miotDid: typeof eff?.miotDid === "string" ? eff.miotDid : "",
                 passToken: typeof eff?.passToken === "string" ? eff.passToken : "",
                 enableTrace: eff?.enableTrace === true,
                 pollInterval:
@@ -589,6 +608,7 @@ const xiaoaiChannel = {
         isConfigured: (account) => Boolean(account?.configured),
         describeAccount: (account) => ({
             accountId: account?.accountId ?? "default",
+            label: account?.label || account?.accountId || "default",
             enabled: account?.enabled !== false,
             configured: Boolean(account?.configured),
             miUser: account?.miUser ? "[set]" : "[missing]",
