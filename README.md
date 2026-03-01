@@ -18,8 +18,27 @@
 
 ## 安装
 
+### 1. 安装依赖
+
+```bash
+cd xiaoai-channel
+npm install
+```
+
+主要依赖：
+- **mi-service-lite** — 小米云服务 API（MiNA / MiIOT）
+- **edge-tts** — Edge TTS 引擎
+
+### 2. 安装插件到 OpenClaw
+
 ```bash
 openclaw plugins install /path/to/openclaw_xiaoai_channel/xiaoai-channel
+```
+
+安装后重启 gateway 生效：
+
+```bash
+openclaw restart
 ```
 
 ## 配置
