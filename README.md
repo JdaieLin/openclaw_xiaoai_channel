@@ -91,6 +91,82 @@ openclaw plugins install /path/to/openclaw_xiaoai_channel/xiaoai-channel
 | `keywordBlacklist` | string | (见上) | 不转发的关键词（逗号分隔） |
 | `enableTrace` | boolean | false | 启用 mi-service-lite 调试日志 |
 
+## 调试工具 (tools.js)
+
+插件附带一个独立的调试工具，用于在不启动 OpenClaw 的情况下直接测试小爱设备连接、TTS 播放、音量控制等功能。
+
+### 前置条件
+
+需要先通过 OpenClaw 配置完成一次小米账号登录（凭据缓存在 `~/.mi.json`），之后工具使用 `passToken` 认证即可。
+
+### 命令一览
+
+```bash
+# 进入插件目录
+cd xiaoai-channel
+
+# 列出所有可用设备（查看设备名称、型号、miotDID 等信息）
+node tools.js list --pass-token "V1:xxx..."
+
+# 播放 TTS 文本
+node tools.js tts "你好世界"
+node tools.js tts "你好世界" --did "小爱触屏音箱"
+
+# 查看/设置音量 (0-100)
+node tools.js volume                        # 查看当前音量
+node tools.js volume 30                     # 设置音量为 30
+node tools.js volume 20 --did "卧室的小爱"   # 对指定设备设置音量
+
+# 查看设备播放状态
+node tools.js status
+
+# 暂停当前播放
+node tools.js pause
+
+# 测试打断小爱自带回复（先播放长文本，3秒后尝试打断）
+node tools.js test-interrupt
+```
+
+### 参数说明
+
+| 参数 | 说明 |
+|------|------|
+| `--pass-token <token>` | 小米 passToken（也可通过环境变量 `MI_PASS_TOKEN` 设置） |
+| `--did <设备名>` | 指定设备名称（也可通过环境变量 `MI_DID` 设置） |
+| `--tts-engine auto\|miot\|mina` | 指定 TTS 引擎（默认 auto） |
+| `--trace` | 启用 mi-service-lite 调试日志 |
+
+### 命令别名
+
+| 命令 | 别名 |
+|------|------|
+| `list` | `ls`, `devices` |
+| `tts` | `say`, `speak` |
+| `volume` | `vol` |
+| `status` | `info` |
+| `pause` | `stop` |
+| `test-interrupt` | `interrupt` |
+
+### 使用示例
+
+```bash
+# 通过环境变量设置 passToken，避免每次输入
+export MI_PASS_TOKEN="V1:xxx..."
+
+# 列出设备，找到 did 和 miotDID
+node tools.js list
+
+# 对指定设备测试 TTS
+node tools.js tts "测试语音播报" --did "小爱触屏音箱"
+
+# 调低音量后再测试
+node tools.js volume 15 --did "小爱触屏音箱"
+node tools.js tts "音量已调低"
+
+# 测试打断功能是否对你的设备有效
+node tools.js test-interrupt --did "小爱触屏音箱"
+```
+
 ## License
 
 MIT
