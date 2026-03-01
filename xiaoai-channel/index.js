@@ -227,12 +227,34 @@ async function getLastConversation(mina) {
 /**
  * Send TTS text via XiaoAi speaker.
  */
-async function ttsPlay(mina, text, miiot) {
-    if (miiot) {
-        const ok = await miiot.doAction(5, 1, [{ text, type: 0 }]);
-        if (ok) return;
+async function ttsPlay(mina, text, miiot, playbackOptions = {}) {
+    const preferred = chooseTtsEngine(playbackOptions, Boolean(miiot));
+    const order = preferred === "miot" ? ["miot", "mina"] : ["mina", "miot"];
+    let lastError = null;
+
+    for (const engine of order) {
+        if (engine === "miot") {
+            if (!miiot) continue;
+            try {
+                const ok = await miiot.doAction(5, 1, [{ text, type: 0 }]);
+                if (ok) return;
+            } catch (err) {
+                lastError = err;
+            }
+            continue;
+        }
+
+        try {
+            const ok = await mina.play({ tts: text });
+            if (ok !== false) return;
+        } catch (err) {
+            lastError = err;
+        }
     }
-    await mina.play({ tts: text });
+
+    if (lastError) {
+        throw lastError;
+    }
 }
 
 /**
@@ -269,8 +291,9 @@ async function ttsPause(mina, miiot) {
  * the word "test". This is a firmware-level debug marker and cannot be
  * avoided through software.
  */
-async function forceStopXiaoaiResponse(mina, miiot, log) {
-    if (miiot) {
+async function forceStopXiaoaiResponse(mina, miiot, log, playbackOptions = {}) {
+    const preferred = chooseTtsEngine(playbackOptions, Boolean(miiot));
+    if (preferred === "miot" && miiot) {
         // MiIOT doAction is the only method that can override MiNA TTS.
         // Send a silent comma to replace XiaoAi's current response.
         log?.debug?.("  打断: 使用 MiIOT doAction 覆盖小爱回复...");
@@ -279,12 +302,16 @@ async function forceStopXiaoaiResponse(mina, miiot, log) {
         await sleep(200);
         await miiot.doAction(3, 2, []).catch(() => {});
     } else {
-        // Fallback without MiIOT: try stop/pause (less reliable for TTS)
-        log?.debug?.("  打断: 无 MiIOT, 回退到 stop+pause...");
+        // Old firmware usually works better with stop/pause first.
+        log?.debug?.("  打断: 使用 stop+pause...");
         await Promise.allSettled([
             mina.stop().catch(() => {}),
             mina.pause().catch(() => {}),
         ]);
+        if (miiot) {
+            // Best-effort extra stop for mixed firmware behavior.
+            await miiot.doAction(3, 2, []).catch(() => {});
+        }
     }
 
     log?.debug?.("  打断命令已发送");
@@ -325,14 +352,14 @@ function splitTextForTTS(text, maxLen = 200) {
 /**
  * TTS a long text in segments with estimated wait between chunks.
  */
-async function ttsLongText(mina, text, chunkSize = 200, miiot) {
+async function ttsLongText(mina, text, chunkSize = 200, miiot, playbackOptions = {}) {
     const chunks = splitTextForTTS(text, chunkSize);
     for (let i = 0; i < chunks.length; i++) {
         if (i > 0) {
             const waitMs = Math.max(chunks[i - 1].length * 200, 2000);
             await sleep(waitMs);
         }
-        await ttsPlay(mina, chunks[i], miiot);
+        await ttsPlay(mina, chunks[i], miiot, playbackOptions);
     }
 }
 
@@ -367,11 +394,13 @@ function resolveAccountSection(cfg, accountId) {
     // Inherit shared passToken from channel-level config.
     // Account-level value takes priority over channel-level.
     const passToken = acct.passToken || section.passToken || "";
+    const ttsEngine = acct.ttsEngine || section.ttsEngine || "auto";
 
     return {
         enabled: section?.enabled !== false,
         ...acct,
         passToken,
+        ttsEngine,
         accountId: accountKey,
         hasAccountSection:
             Boolean(acct && typeof acct === "object" && Object.keys(acct).length > 0),
@@ -467,7 +496,11 @@ async function processInboundQuery(ctx, mina, query, account, miiot) {
             typeof account.ttsChunkSize === "number" && Number.isFinite(account.ttsChunkSize)
                 ? account.ttsChunkSize
                 : 200;
-        await ttsLongText(mina, text, chunkSize, miiot);
+        const playbackOptions = {
+            systemVersion: account.systemVersion,
+            ttsEngine: account.ttsEngine,
+        };
+        await ttsLongText(mina, text, chunkSize, miiot, playbackOptions);
     }
 
     return replies.length;
@@ -515,6 +548,7 @@ const xiaoaiChannel = {
                 enabled: { type: "boolean" },
                 // Shared passToken — inherited by all accounts, can be overridden per-account
                 passToken: { type: "string", description: "小米 passToken (所有设备共享，可在 account 中覆盖)" },
+                ttsEngine: { type: "string", description: "TTS引擎策略 auto|miot|mina (所有设备共享，可在 account 中覆盖)" },
                 accounts: {
                     type: "array",
                     items: {
@@ -525,6 +559,7 @@ const xiaoaiChannel = {
                             label: { type: "string", description: "设备显示名称 (如'客厅小爱'、'卧室小爱')" },
                             enabled: { type: "boolean" },
                             passToken: { type: "string", description: "小米 passToken (不填则继承顶层配置)" },
+                            ttsEngine: { type: "string", description: "TTS引擎策略 auto|miot|mina" },
                             hardware: { type: "string", description: "设备型号 (如 LX04)" },
                             did: { type: "string", description: "设备名称 (米家App中的名称，如'小爱触屏音箱')" },
                             miotDid: { type: "string", description: "MiIOT 设备 DID (通常自动获取，无需手动填写)" },
@@ -566,6 +601,7 @@ const xiaoaiChannel = {
                 hardware: typeof eff?.hardware === "string" ? eff.hardware : "LX04",
                 did: typeof eff?.did === "string" ? eff.did : "",
                 miotDid: typeof eff?.miotDid === "string" ? eff.miotDid : "",
+                ttsEngine: normalizeTtsEngine(eff?.ttsEngine),
                 passToken: typeof eff?.passToken === "string" ? eff.passToken : "",
                 enableTrace: eff?.enableTrace === true,
                 pollInterval:
@@ -595,6 +631,7 @@ const xiaoaiChannel = {
             passToken: account?.passToken ? "[set]" : "[missing]",
             hardware: account?.hardware || "LX04",
             did: account?.did || "[auto]",
+            ttsEngine: account?.ttsEngine || "auto",
             pollInterval: account?.pollInterval ?? 1,
             triggerPrefix: account?.triggerPrefix || "[none]",
         }),
@@ -628,9 +665,14 @@ const xiaoaiChannel = {
 
             // Initialize MiNA and send TTS
             const mina = await initMiNA(account);
-            const miotDid = account.miotDid || mina.account?.device?.miotDID;
+            const deviceInfo = mina.account?.device;
+            const systemVersion = getSystemVersion(deviceInfo);
+            const miotDid = account.miotDid || deviceInfo?.miotDID;
             const miiot = await initMiIOT(account, miotDid);
-            await ttsLongText(mina, text, undefined, miiot);
+            await ttsLongText(mina, text, undefined, miiot, {
+                systemVersion,
+                ttsEngine: account.ttsEngine,
+            });
             return { ok: true, channel: CHANNEL_ID };
         },
         sendMedia: async ({ cfg, accountId, text, mediaUrl }) => {
@@ -694,9 +736,10 @@ const xiaoaiChannel = {
             }
 
             const deviceInfo = mina.account?.device;
+            const systemVersion = getSystemVersion(deviceInfo);
             ctx.log?.info?.(
                 `[${ctx.accountId}] ✓ 已连接设备: ${deviceInfo?.name ?? "unknown"} ` +
-                `(${deviceInfo?.hardware ?? ""})`,
+                `(${deviceInfo?.hardware ?? ""}${systemVersion ? ` / ${systemVersion}` : ""})`,
             );
 
             // Initialize MiIOT for firmware that requires doAction for TTS
@@ -708,6 +751,15 @@ const xiaoaiChannel = {
                     `[${ctx.accountId}] MiIOT: ${miiot ? `✓ 已连接 (did=${miotDid})` : `✗ 不可用 (did=${miotDid})，将回退到 MiNA TTS`}`,
                 );
             }
+
+            const playbackOptions = {
+                systemVersion,
+                ttsEngine: normalizeTtsEngine(account.ttsEngine),
+            };
+            ctx.log?.info?.(
+                `[${ctx.accountId}] TTS策略: ${chooseTtsEngine(playbackOptions, Boolean(miiot))} ` +
+                `(engine=${playbackOptions.ttsEngine}${systemVersion ? `, version=${systemVersion}` : ""})`,
+            );
 
             // Preflight: load reply handler
             ctx.log?.info?.(`[${ctx.accountId}] 正在加载 OpenClaw reply handler...`);
@@ -765,7 +817,7 @@ const xiaoaiChannel = {
                                     // Stop XiaoAi's own response
                                     if (account.stopXiaoaiResponse !== false) {
                                         ctx.log?.debug?.(`[${ctx.accountId}] 正在打断小爱自带回复...`);
-                                        await forceStopXiaoaiResponse(mina, miiot, ctx.log);
+                                        await forceStopXiaoaiResponse(mina, miiot, ctx.log, playbackOptions);
                                     }
 
                                     ctx.log?.info?.(
@@ -778,7 +830,7 @@ const xiaoaiChannel = {
                                             ctx,
                                             mina,
                                             actualQuery,
-                                            account,
+                                            { ...account, systemVersion },
                                             miiot,
                                         );
                                         const elapsed = ((Date.now() - startMs) / 1000).toFixed(1);
@@ -805,7 +857,7 @@ const xiaoaiChannel = {
                                         );
                                         // Inform user via TTS
                                         try {
-                                            await ttsPlay(mina, "抱歉，我现在无法回答，请稍后再试。", miiot);
+                                            await ttsPlay(mina, "抱歉，我现在无法回答，请稍后再试。", miiot, playbackOptions);
                                         } catch {
                                             // best effort
                                         }
@@ -837,9 +889,12 @@ const xiaoaiChannel = {
 
                         if (errorCount >= maxErrors) {
                             ctx.log?.error?.(
-                                `[${ctx.accountId}] 连续错误达到 ${maxErrors} 次，停止轮询`,
+                                `[${ctx.accountId}] 连续错误达到 ${maxErrors} 次，进入冷却后继续重试`,
                             );
-                            break;
+                            const coolDownSec = 60;
+                            await sleep(coolDownSec * 1000);
+                            errorCount = 0;
+                            continue;
                         }
 
                         const backoff = Math.min(pollInterval * 2 ** errorCount, 60);
@@ -879,4 +934,59 @@ export default plugin;
 
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseVersion(version) {
+    return String(version || "")
+        .split(".")
+        .map((part) => Number.parseInt(part, 10))
+        .map((num) => (Number.isFinite(num) ? num : 0));
+}
+
+function compareVersion(a, b) {
+    const av = parseVersion(a);
+    const bv = parseVersion(b);
+    const len = Math.max(av.length, bv.length);
+    for (let i = 0; i < len; i++) {
+        const ai = av[i] ?? 0;
+        const bi = bv[i] ?? 0;
+        if (ai > bi) return 1;
+        if (ai < bi) return -1;
+    }
+    return 0;
+}
+
+function getSystemVersion(device) {
+    const candidates = [
+        device?.romVersion,
+        device?.rom_version,
+        device?.systemVersion,
+        device?.sysVersion,
+        device?.version,
+        device?.fwVersion,
+    ];
+    for (const value of candidates) {
+        const str = String(value || "").trim();
+        if (str) return str;
+    }
+    return "";
+}
+
+function normalizeTtsEngine(raw) {
+    const value = String(raw || "").trim().toLowerCase();
+    if (value === "miot" || value === "mina" || value === "auto") return value;
+    return "auto";
+}
+
+function chooseTtsEngine(playbackOptions = {}, hasMiIOT = false) {
+    const override = normalizeTtsEngine(playbackOptions.ttsEngine);
+    if (override === "miot") return hasMiIOT ? "miot" : "mina";
+    if (override === "mina") return "mina";
+    if (!hasMiIOT) return "mina";
+
+    const systemVersion = String(playbackOptions.systemVersion || "").trim();
+    if (systemVersion && compareVersion(systemVersion, "2.90.0") < 0) {
+        return "mina";
+    }
+    return "miot";
 }

@@ -2,6 +2,9 @@
 
 将小爱同学智能音箱（LX04 等）变成 OpenClaw 的对话通道。
 
+已兼容 LX04 多系统版本混用：插件会根据设备系统版本自动选择 TTS 通道
+（旧版优先 MiNA，新版优先 MiIOT，并自动回退）。
+
 ## 工作原理
 
 ```
@@ -28,12 +31,14 @@ openclaw plugins install /path/to/openclaw_xiaoai_channel/xiaoai-channel
   "channels": {
     "xiaoai": {
       "enabled": true,
+      "ttsEngine": "auto",             // 全局 TTS 策略: auto|miot|mina
       "accounts": [
         {
           "id": "lx04",
           "enabled": true,
           "did": "小爱触屏音箱",          // 米家App中的设备名称（不是型号！）
           "passToken": "V1:xxx...",      // 从浏览器获取的 passToken
+          "ttsEngine": "auto",           // 可按设备覆盖: auto|miot|mina
           "pollInterval": 1,             // 轮询间隔（秒）
           "stopXiaoaiResponse": true,    // 是否打断小爱自带回复
           "keywordBlacklist": "播放音乐,放首歌,定闹钟,设闹钟,几点了,打开,关闭,音量"
@@ -73,6 +78,7 @@ openclaw plugins install /path/to/openclaw_xiaoai_channel/xiaoai-channel
 | `label` | string | — | 设备显示名称（如"客厅小爱"） |
 | `enabled` | boolean | true | 是否启用 |
 | `passToken` | string | — | 浏览器 passToken |
+| `ttsEngine` | string | auto | TTS 通道策略：`auto`/`miot`/`mina` |
 | `did` | string | — | 设备名称（米家中显示的名称） |
 | `hardware` | string | LX04 | 设备型号（备用） |
 | `miotDid` | string | — | MiIOT 设备 DID（通常自动获取） |

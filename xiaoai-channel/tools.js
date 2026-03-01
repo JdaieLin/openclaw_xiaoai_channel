@@ -29,6 +29,96 @@ function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function parseVersion(version) {
+    return String(version || "")
+        .split(".")
+        .map((part) => Number.parseInt(part, 10))
+        .map((num) => (Number.isFinite(num) ? num : 0));
+}
+
+function compareVersion(a, b) {
+    const av = parseVersion(a);
+    const bv = parseVersion(b);
+    const len = Math.max(av.length, bv.length);
+    for (let i = 0; i < len; i++) {
+        const ai = av[i] ?? 0;
+        const bi = bv[i] ?? 0;
+        if (ai > bi) return 1;
+        if (ai < bi) return -1;
+    }
+    return 0;
+}
+
+function getSystemVersion(device) {
+    const candidates = [
+        device?.romVersion,
+        device?.rom_version,
+        device?.systemVersion,
+        device?.sysVersion,
+        device?.version,
+        device?.fwVersion,
+    ];
+    for (const value of candidates) {
+        const str = String(value || "").trim();
+        if (str) return str;
+    }
+    return "";
+}
+
+function normalizeTtsEngine(raw) {
+    const value = String(raw || "").trim().toLowerCase();
+    if (value === "miot" || value === "mina" || value === "auto") return value;
+    return "auto";
+}
+
+function chooseTtsEngine({ systemVersion, hasMiIOT, overrideEngine }) {
+    const override = normalizeTtsEngine(overrideEngine);
+    if (override === "miot") return hasMiIOT ? "miot" : "mina";
+    if (override === "mina") return "mina";
+    if (!hasMiIOT) return "mina";
+
+    // LX04 older firmware is usually more stable via MiNA first.
+    if (systemVersion && compareVersion(systemVersion, "2.90.0") < 0) {
+        return "mina";
+    }
+    return "miot";
+}
+
+async function playTTSWithFallback({ mina, miiot, text, systemVersion, overrideEngine }) {
+    const preferred = chooseTtsEngine({
+        systemVersion,
+        hasMiIOT: Boolean(miiot),
+        overrideEngine,
+    });
+    const order = preferred === "miot" ? ["miot", "mina"] : ["mina", "miot"];
+    let lastError = null;
+
+    for (const engine of order) {
+        if (engine === "miot") {
+            if (!miiot) continue;
+            try {
+                const ok = await miiot.doAction(5, 1, [{ text, type: 0 }]);
+                if (ok) return { ok: true, engine: "MiIOT" };
+            } catch (err) {
+                lastError = err;
+            }
+            continue;
+        }
+
+        try {
+            const ok = await mina.play({ tts: text });
+            if (ok !== false) return { ok: true, engine: "MiNA" };
+        } catch (err) {
+            lastError = err;
+        }
+    }
+
+    if (lastError) {
+        throw lastError;
+    }
+    return { ok: false, engine: preferred === "miot" ? "MiIOT" : "MiNA" };
+}
+
 // ─── Helpers ────────────────────────────────────────────────
 
 function printUsage() {
@@ -47,6 +137,7 @@ function printUsage() {
 认证方式:
   命令行参数:  --pass-token <passToken>
   环境变量:    MI_PASS_TOKEN
+    TTS引擎:     --tts-engine auto|miot|mina (默认 auto)
 
 示例:
   node tools.js list --pass-token "V1:xxx..."
@@ -54,6 +145,7 @@ function printUsage() {
   node tools.js volume 50
   node tools.js volume 20 --did "卧室的小爱"
   node tools.js test-interrupt
+    node tools.js tts "你好" --tts-engine mina
 `);
 }
 
@@ -68,6 +160,8 @@ function parseArgs(argv) {
             args.did = argv[++i];
         } else if (arg === "--trace") {
             args.trace = true;
+        } else if (arg === "--tts-engine") {
+            args.ttsEngine = argv[++i];
         } else if (arg === "--help" || arg === "-h") {
             args.help = true;
         } else {
@@ -81,13 +175,14 @@ function parseArgs(argv) {
 function getCredentials(args) {
     const passToken = args.passToken || process.env.MI_PASS_TOKEN || "";
     const did = args.did || process.env.MI_DID || "";
+    const ttsEngine = normalizeTtsEngine(args.ttsEngine || process.env.MI_TTS_ENGINE || "auto");
 
     if (!passToken) {
         console.error("❌ 缺少 passToken。请通过 --pass-token 或 MI_PASS_TOKEN 环境变量提供。");
         console.error("   示例: node tools.js list --pass-token \"V1:xxx...\"");
         process.exit(1);
     }
-    return { passToken, did, trace: Boolean(args.trace) };
+    return { passToken, did, trace: Boolean(args.trace), ttsEngine };
 }
 
 /**
@@ -199,20 +294,21 @@ async function cmdList(creds) {
     }
 
     console.log(`找到 ${devices.length} 个设备:\n`);
-    console.log("┌─────┬──────────────────────┬──────────────┬──────────┬──────────────────┐");
-    console.log("│ #   │ 名称                 │ 型号         │ 状态     │ miotDID          │");
-    console.log("├─────┼──────────────────────┼──────────────┼──────────┼──────────────────┤");
+    console.log("┌─────┬──────────────────────┬──────────────┬────────────┬──────────┬──────────────────┐");
+    console.log("│ #   │ 名称                 │ 型号         │ 系统版本   │ 状态     │ miotDID          │");
+    console.log("├─────┼──────────────────────┼──────────────┼────────────┼──────────┼──────────────────┤");
 
     for (let i = 0; i < devices.length; i++) {
         const d = devices[i];
         const num = String(i + 1).padEnd(3);
         const name = (d.name || d.alias || "未知").padEnd(20).slice(0, 20);
         const hw = (d.hardware || d.model || "").padEnd(12).slice(0, 12);
+        const sys = (getSystemVersion(d) || "未知").padEnd(10).slice(0, 10);
         const status = d.presence === "online" ? "🟢 在线 " : "🔴 离线 ";
         const miotDid = (d.miotDID || "").padEnd(16).slice(0, 16);
-        console.log(`│ ${num} │ ${name} │ ${hw} │ ${status} │ ${miotDid} │`);
+        console.log(`│ ${num} │ ${name} │ ${hw} │ ${sys} │ ${status} │ ${miotDid} │`);
     }
-    console.log("└─────┴──────────────────────┴──────────────┴──────────┴──────────────────┘");
+    console.log("└─────┴──────────────────────┴──────────────┴────────────┴──────────┴──────────────────┘");
 
     // Show the current connected device
     const cur = mina.account?.device;
@@ -220,6 +316,7 @@ async function cmdList(creds) {
         console.log(`\n当前连接的设备: ${cur.name || cur.alias || "未知"} (${cur.hardware || ""})`);
         console.log(`  deviceId:     ${cur.deviceID || cur.deviceId || ""}`);
         console.log(`  serialNumber: ${cur.serialNumber || ""}`);
+        console.log(`  systemVersion:${getSystemVersion(cur) || "未知"}`);
         console.log(`  miotDID:      ${cur.miotDID || ""}`);
         console.log(`  mac:          ${cur.mac || ""}`);
     }
@@ -237,7 +334,11 @@ async function cmdTTS(creds, text) {
     console.log(`🔊 正在连接设备...`);
     const mina = await createMiNA(creds);
     const device = mina.account?.device;
+    const systemVersion = getSystemVersion(device);
     console.log(`✓ 已连接: ${device?.name || "未知"} (${device?.hardware || ""})`);
+    if (systemVersion) {
+        console.log(`✓ 系统版本: ${systemVersion}`);
+    }
 
     // Try MiIOT first for newer firmware
     const miotDid = device?.miotDID;
@@ -248,22 +349,15 @@ async function cmdTTS(creds, text) {
 
     console.log(`\n📢 播放TTS: "${text}"\n`);
 
-    let success = false;
-    if (miiot) {
-        try {
-            success = await miiot.doAction(5, 1, [{ text, type: 0 }]);
-            if (success) {
-                console.log("✅ TTS 播放成功 (via MiIOT)");
-                return;
-            }
-        } catch (err) {
-            console.log(`⚠️  MiIOT TTS 失败: ${err.message}, 尝试 MiNA...`);
-        }
-    }
-
     try {
-        success = await mina.play({ tts: text });
-        console.log(success ? "✅ TTS 播放成功 (via MiNA)" : "❌ TTS 播放失败");
+        const result = await playTTSWithFallback({
+            mina,
+            miiot,
+            text,
+            systemVersion,
+            overrideEngine: creds.ttsEngine,
+        });
+        console.log(result.ok ? `✅ TTS 播放成功 (via ${result.engine})` : "❌ TTS 播放失败");
     } catch (err) {
         console.error(`❌ TTS 播放失败: ${err.message}`);
         process.exit(1);
@@ -357,19 +451,32 @@ async function cmdPause(creds) {
     console.log(`⏸️  正在连接设备...`);
     const mina = await createMiNA(creds);
     const device = mina.account?.device;
+    const systemVersion = getSystemVersion(device);
     console.log(`✓ 已连接: ${device?.name || "未知"} (${device?.hardware || ""})\n`);
 
     // Try MiIOT first
     const miotDid = device?.miotDID;
     const miiot = await createMiIOT(creds, miotDid);
+    const preferredEngine = chooseTtsEngine({
+        systemVersion,
+        hasMiIOT: Boolean(miiot),
+        overrideEngine: creds.ttsEngine,
+    });
 
     try {
-        if (miiot) {
+        if (preferredEngine === "miot" && miiot) {
             await miiot.doAction(3, 2, []);
             console.log("✅ 已暂停播放 (via MiIOT)");
         } else {
             const success = await mina.pause();
-            console.log(success ? "✅ 已暂停播放" : "⚠️  暂停命令已发送（设备可能未在播放）");
+            if (success) {
+                console.log("✅ 已暂停播放 (via MiNA)");
+            } else if (miiot) {
+                await miiot.doAction(3, 2, []).catch(() => {});
+                console.log("⚠️  MiNA 暂停未确认，已补发 MiIOT stop");
+            } else {
+                console.log("⚠️  暂停命令已发送（设备可能未在播放）");
+            }
         }
     } catch (err) {
         console.log(`⚠️  暂停失败 (可能当前没有在播放): ${err.message}`);
@@ -386,7 +493,11 @@ async function cmdTestInterrupt(creds) {
 
     const mina = await createMiNA(creds);
     const device = mina.account?.device;
+    const systemVersion = getSystemVersion(device);
     console.log(`✓ 已连接: ${device?.name || "未知"} (${device?.hardware || ""})`);
+    if (systemVersion) {
+        console.log(`✓ 系统版本: ${systemVersion}`);
+    }
 
     const miotDid = device?.miotDID;
     const miiot = await createMiIOT(creds, miotDid);
@@ -417,7 +528,13 @@ async function cmdTestInterrupt(creds) {
     console.log(`\n🛑 Step 3: 执行打断...`);
     const startMs = Date.now();
 
-    if (miiot) {
+    const preferredEngine = chooseTtsEngine({
+        systemVersion,
+        hasMiIOT: Boolean(miiot),
+        overrideEngine: creds.ttsEngine,
+    });
+
+    if (preferredEngine === "miot" && miiot) {
         // Use MiIOT doAction to override the MiNA TTS (different audio pipeline)
         console.log(`   使用 MiIOT doAction 覆盖 MiNA TTS...`);
         await miiot.doAction(5, 1, [{ text: "，", type: 0 }]).catch(() => {});
@@ -429,8 +546,8 @@ async function cmdTestInterrupt(creds) {
         await miiot.doAction(3, 2, []).catch(() => {});
         console.log(`   MiIOT stop 完成 (${Date.now() - startMs}ms)`);
     } else {
-        // Fallback without MiIOT: try stop/pause (less reliable for TTS)
-        console.log(`   ⚠️ 无 MiIOT, 回退到 stop+pause (可能无法打断TTS)...`);
+        // Strategy fallback for firmware where MiNA is preferred.
+        console.log(`   ⚠️ 当前策略回退到 stop+pause (可能无法打断TTS)...`);
         await Promise.allSettled([
             mina.stop().catch(() => {}),
             mina.pause().catch(() => {}),
@@ -444,7 +561,7 @@ async function cmdTestInterrupt(creds) {
     // Step 4: Wait and play confirmation
     await sleep(800);
     console.log(`\n📢 Step 4: 播放确认消息...`);
-    if (miiot) {
+    if (preferredEngine === "miot" && miiot) {
         await miiot.doAction(5, 1, [{ text: "打断测试完成。如果你没有听到之前那段长文本的结尾，说明打断成功了。", type: 0 }]).catch(() => {});
     } else {
         await mina.play({ tts: "打断测试完成。如果你没有听到之前那段长文本的结尾，说明打断成功了。" }).catch(() => {});
