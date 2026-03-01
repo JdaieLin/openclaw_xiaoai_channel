@@ -1,9 +1,10 @@
 # OpenClaw XiaoAi Channel Plugin
 
-将小爱同学智能音箱（LX04 等）变成 OpenClaw 的对话通道。
+将小爱同学智能音箱（LX04 等）或小米电视变成 OpenClaw 的对话通道。
 
-已兼容 LX04 多系统版本混用：插件会根据设备系统版本自动选择 TTS 通道
-（旧版优先 MiNA，新版优先 MiIOT，并自动回退）。
+已兼容：
+- **智能音箱**：LX04 多系统版本混用（自动选择 MiNA/MiIOT TTS 通道）
+- **小米电视**：内置小爱同学的小米/Redmi 电视（自动检测设备类型，优先 MiIOT TTS）
 
 ## 工作原理
 
@@ -15,6 +16,9 @@
 1. **轮询监听**：通过小米云服务 API 持续轮询小爱同学的对话记录
 2. **拦截转发**：检测到新的用户提问后，停止小爱自带回复，将问题转发给 OpenClaw
 3. **语音回复**：收到 OpenClaw 的回复后，通过小爱同学 TTS 播报
+
+> **小米电视说明**：插件会自动检测电视设备并优先使用 MiIOT TTS（MiNA play 在电视上不可用）。
+> 如果自动检测不准确，可通过 `deviceType: "tv"` 手动指定。
 
 ## 安装
 
@@ -62,6 +66,16 @@ openclaw restart
           "pollInterval": 1,             // 轮询间隔（秒）
           "stopXiaoaiResponse": true,    // 是否打断小爱自带回复
           "keywordBlacklist": "播放音乐,放首歌,定闹钟,设闹钟,几点了,打开,关闭,音量"
+        },
+        {
+          "id": "tv",
+          "enabled": true,
+          "did": "客厅电视",              // 米家App中小米电视的名称
+          "passToken": "V1:xxx...",      // 同一账号可共享 passToken
+          "deviceType": "auto",          // auto|speaker|tv (auto=根据型号自动检测)
+          "pollInterval": 1,
+          "stopXiaoaiResponse": true,
+          "keywordBlacklist": "播放,打开,关闭,音量,频道,换台"
         }
       ]
     }
@@ -73,7 +87,7 @@ openclaw restart
 
 #### `did` — 设备名称
 
-⚠️ `did` 必须是**米家 App 中显示的设备名称**（如 `"小爱触屏音箱"`），而不是硬件型号（如 `"LX04"`）。
+⚠️ `did` 必须是**米家 App 中显示的设备名称**（如 `"小爱触屏音箱"` 或 `"客厅电视"`），而不是硬件型号（如 `"LX04"`）。
 
 查看方法：打开米家 App → 找到你的小爱音箱 → 查看设备名称。
 
@@ -109,6 +123,21 @@ openclaw restart
 | `stopXiaoaiResponse` | boolean | true | 打断小爱自带回复 |
 | `keywordBlacklist` | string | (见上) | 不转发的关键词（逗号分隔） |
 | `enableTrace` | boolean | false | 启用 mi-service-lite 调试日志 |
+| `deviceType` | string | auto | 设备类型：`auto`（根据型号自动检测）/`speaker`/`tv` |
+| `miiotTtsSiid` | number | 5 | MiIOT TTS service ID（自定义以适配不同设备） |
+| `miiotTtsAiid` | number | 1 | MiIOT TTS action ID |
+| `miiotStopSiid` | number | 3 | MiIOT 停止 service ID |
+| `miiotStopAiid` | number | 2 | MiIOT 停止 action ID |
+
+### 小米电视配置说明
+
+插件会根据设备硬件型号自动检测小米电视（包含 MITV、MDZ- 等标识的设备），并自动：
+- 优先使用 MiIOT 进行 TTS 播报（MiNA play 在电视上不可用）
+- 禁用 MiNA play 回退
+
+如果自动检测不准确（例如新型号），可手动指定 `"deviceType": "tv"`。
+
+如果你的电视型号使用了不同的 MiIOT action 规格，可通过 `miiotTtsSiid`、`miiotTtsAiid`、`miiotStopSiid`、`miiotStopAiid` 进行自定义。使用 `node tools.js list` 查看设备信息和自动检测结果。
 
 ## 调试工具 (tools.js)
 

@@ -18,6 +18,87 @@ import { pathToFileURL } from "node:url";
 const CHANNEL_ID = "xiaoai";
 const MI_CACHE_BACKUP_PATH = path.join(os.homedir(), ".openclaw", "xiaoai-mi-cache.json");
 
+// ─── Device Type & Action Specs ─────────────────────────────
+
+/**
+ * Default MiIOT action specs per device type.
+ * Speakers: Intelligent Speaker service (siid=5), Speaker service (siid=3)
+ * TVs: Same siid/aiid defaults — override via config if your TV model differs.
+ */
+const DEVICE_ACTION_SPECS = {
+    speaker: {
+        tts:  { siid: 5, aiid: 1 },  // Intelligent Speaker → Play Text
+        stop: { siid: 3, aiid: 2 },  // Speaker → Stop
+    },
+    tv: {
+        tts:  { siid: 5, aiid: 1 },  // Intelligent Speaker → Play Text (same default)
+        stop: { siid: 3, aiid: 2 },  // Speaker → Stop
+    },
+};
+
+/** Known Xiaomi TV hardware identifier patterns. */
+const TV_HARDWARE_PATTERNS = [
+    /mitv/i,
+    /mi\s*tv/i,
+    /xiaomi\s*tv/i,
+    /redmi\s*tv/i,
+    /mdz-/i,           // Mi Box / TV Stick
+    /^l\d+m\d+/i,      // e.g. L55M5-AZ
+    /^e\d+[a-z]/i,     // e.g. E55C / E43K (Xiaomi TV)
+    /^p1\s/i,          // Xiaomi Projector
+];
+
+/**
+ * Detect whether a device is a TV or speaker based on hardware/model info.
+ */
+function detectDeviceType(device) {
+    const hw = String(device?.hardware || device?.model || "").trim();
+    for (const pattern of TV_HARDWARE_PATTERNS) {
+        if (pattern.test(hw)) return "tv";
+    }
+    return "speaker";
+}
+
+function normalizeDeviceType(raw) {
+    const value = String(raw || "").trim().toLowerCase();
+    if (value === "tv" || value === "speaker") return value;
+    return "auto";
+}
+
+/**
+ * Resolve MiIOT action specs from account config + device type defaults.
+ * Account-level overrides (miiotTtsSiid etc.) take priority.
+ */
+function resolveActionSpecs(account, deviceInfo) {
+    const configuredType = normalizeDeviceType(account?.deviceType);
+    const deviceType =
+        configuredType === "auto" ? detectDeviceType(deviceInfo) : configuredType;
+
+    const defaults = DEVICE_ACTION_SPECS[deviceType] || DEVICE_ACTION_SPECS.speaker;
+
+    return {
+        deviceType,
+        tts: {
+            siid: account?.miiotTtsSiid ?? defaults.tts.siid,
+            aiid: account?.miiotTtsAiid ?? defaults.tts.aiid,
+        },
+        stop: {
+            siid: account?.miiotStopSiid ?? defaults.stop.siid,
+            aiid: account?.miiotStopAiid ?? defaults.stop.aiid,
+        },
+    };
+}
+
+/**
+ * Build TTS action parameters based on device type.
+ * Speakers expect [{text, type: 0}], TVs may accept the same or [text].
+ */
+function buildTtsActionParams(text, deviceType) {
+    // Both speakers and TVs currently use the same param format.
+    // If a specific TV model needs [text] instead, override via config.
+    return [{ text, type: 0 }];
+}
+
 // ─── Plugin SDK Loader ──────────────────────────────────────
 
 let getReplyFromConfigLoader = null;
@@ -306,12 +387,14 @@ async function getLastConversation(mina) {
 }
 
 /**
- * Send TTS text via XiaoAi speaker.
+ * Send TTS text via XiaoAi speaker or TV.
+ * @param {object} actionSpecs - Resolved action specs from resolveActionSpecs()
  */
-async function ttsPlay(mina, text, miiot, playbackOptions = {}) {
+async function ttsPlay(mina, text, miiot, playbackOptions = {}, actionSpecs) {
     const normalizedText = normalizeTtsText(text);
     if (!normalizedText) return;
 
+    const specs = actionSpecs || resolveActionSpecs(null, null);
     const preferred = chooseTtsEngine(playbackOptions, Boolean(miiot));
     const order = preferred === "miot" ? ["miot", "mina"] : ["mina", "miot"];
     let lastError = null;
@@ -320,13 +403,17 @@ async function ttsPlay(mina, text, miiot, playbackOptions = {}) {
         if (engine === "miot") {
             if (!miiot) continue;
             try {
-                const ok = await miiot.doAction(5, 1, [{ text: normalizedText, type: 0 }]);
+                const params = buildTtsActionParams(normalizedText, specs.deviceType);
+                const ok = await miiot.doAction(specs.tts.siid, specs.tts.aiid, params);
                 if (ok) return;
             } catch (err) {
                 lastError = err;
             }
             continue;
         }
+
+        // MiNA play — not available for TV devices
+        if (specs.deviceType === "tv") continue;
 
         try {
             const ok = await mina.play({ tts: normalizedText });
@@ -343,11 +430,13 @@ async function ttsPlay(mina, text, miiot, playbackOptions = {}) {
 
 /**
  * Pause/stop current XiaoAi response.
+ * @param {object} actionSpecs - Resolved action specs
  */
-async function ttsPause(mina, miiot) {
+async function ttsPause(mina, miiot, actionSpecs) {
+    const specs = actionSpecs || resolveActionSpecs(null, null);
     try {
         if (miiot) {
-            await miiot.doAction(3, 2, []);
+            await miiot.doAction(specs.stop.siid, specs.stop.aiid, []);
         } else {
             await mina.pause();
         }
@@ -375,16 +464,22 @@ async function ttsPause(mina, miiot) {
  * the word "test". This is a firmware-level debug marker and cannot be
  * avoided through software.
  */
-async function forceStopXiaoaiResponse(mina, miiot, log, playbackOptions = {}) {
+async function forceStopXiaoaiResponse(mina, miiot, log, playbackOptions = {}, actionSpecs) {
+    const specs = actionSpecs || resolveActionSpecs(null, null);
     const preferred = chooseTtsEngine(playbackOptions, Boolean(miiot));
     if (preferred === "miot" && miiot) {
         // MiIOT doAction is the only method that can override MiNA TTS.
         // Send a silent comma to replace XiaoAi's current response.
         log?.debug?.("  打断: 使用 MiIOT doAction 覆盖小爱回复...");
-        await miiot.doAction(5, 1, [{ text: "，", type: 0 }]).catch(() => {});
+        const params = buildTtsActionParams("，", specs.deviceType);
+        await miiot.doAction(specs.tts.siid, specs.tts.aiid, params).catch(() => {});
         // Brief pause then stop the comma TTS
         await sleep(200);
-        await miiot.doAction(3, 2, []).catch(() => {});
+        await miiot.doAction(specs.stop.siid, specs.stop.aiid, []).catch(() => {});
+    } else if (specs.deviceType === "tv" && miiot) {
+        // TV without MiIOT preferred — still try MiIOT stop since MiNA pause won't work on TVs
+        log?.debug?.("  打断: TV 设备使用 MiIOT stop...");
+        await miiot.doAction(specs.stop.siid, specs.stop.aiid, []).catch(() => {});
     } else {
         // Old firmware usually works better with stop/pause first.
         log?.debug?.("  打断: 使用 stop+pause...");
@@ -394,7 +489,7 @@ async function forceStopXiaoaiResponse(mina, miiot, log, playbackOptions = {}) {
         ]);
         if (miiot) {
             // Best-effort extra stop for mixed firmware behavior.
-            await miiot.doAction(3, 2, []).catch(() => {});
+            await miiot.doAction(specs.stop.siid, specs.stop.aiid, []).catch(() => {});
         }
     }
 
@@ -435,15 +530,16 @@ function splitTextForTTS(text, maxLen = 200) {
 
 /**
  * TTS a long text in segments with estimated wait between chunks.
+ * @param {object} actionSpecs - Resolved action specs
  */
-async function ttsLongText(mina, text, chunkSize = 200, miiot, playbackOptions = {}) {
+async function ttsLongText(mina, text, chunkSize = 200, miiot, playbackOptions = {}, actionSpecs) {
     const chunks = splitTextForTTS(text, chunkSize);
     for (let i = 0; i < chunks.length; i++) {
         if (i > 0) {
             const waitMs = Math.max(chunks[i - 1].length * 200, 2000);
             await sleep(waitMs);
         }
-        await ttsPlay(mina, chunks[i], miiot, playbackOptions);
+        await ttsPlay(mina, chunks[i], miiot, playbackOptions, actionSpecs);
     }
 }
 
@@ -542,7 +638,7 @@ function sanitizeSessionPart(value) {
 /**
  * Process a new user query through OpenClaw agent pipeline.
  */
-async function processInboundQuery(ctx, mina, query, account, miiot) {
+async function processInboundQuery(ctx, mina, query, account, miiot, actionSpecs) {
     const accountLabel = sanitizeSessionPart(ctx.accountId || "default") || "default";
     const senderId = `xiaoai-user-${accountLabel}`;
     const displayLabel = account.label || accountLabel;
@@ -585,8 +681,9 @@ async function processInboundQuery(ctx, mina, query, account, miiot) {
         const playbackOptions = {
             systemVersion: account.systemVersion,
             ttsEngine: account.ttsEngine,
+            deviceType: actionSpecs?.deviceType,
         };
-        await ttsLongText(mina, text, chunkSize, miiot, playbackOptions);
+        await ttsLongText(mina, text, chunkSize, miiot, playbackOptions, actionSpecs);
     }
 
     return replies.length;
@@ -612,9 +709,9 @@ const xiaoaiChannel = {
     meta: {
         id: CHANNEL_ID,
         label: "XiaoAi",
-        selectionLabel: "XiaoAi (小爱同学 Smart Speaker)",
+        selectionLabel: "XiaoAi (小爱同学 Smart Speaker / TV)",
         docsPath: "/channels/xiaoai",
-        blurb: "小爱同学智能音箱桥接通道，通过小米云服务 API 实现语音对话转发。",
+        blurb: "小爱同学智能音箱/电视桥接通道，通过小米云服务 API 实现语音对话转发。",
         aliases: ["xiaoai", "xiaomi", "miai"],
     },
     capabilities: {
@@ -657,6 +754,11 @@ const xiaoaiChannel = {
                             ttsChunkSize: { type: "number", description: "TTS分段字符数" },
                             stopXiaoaiResponse: { type: "boolean", description: "是否停止小爱自带回复" },
                             keywordBlacklist: { type: "string", description: "不转发的关键词(逗号分隔)" },
+                            deviceType: { type: "string", description: "设备类型 auto|speaker|tv (auto=根据型号自动检测)" },
+                            miiotTtsSiid: { type: "number", description: "MiIOT TTS service ID (默认5，自定义以适配不同设备)" },
+                            miiotTtsAiid: { type: "number", description: "MiIOT TTS action ID (默认1)" },
+                            miiotStopSiid: { type: "number", description: "MiIOT 停止 service ID (默认3)" },
+                            miiotStopAiid: { type: "number", description: "MiIOT 停止 action ID (默认2)" },
                         },
                     },
                 },
@@ -705,6 +807,11 @@ const xiaoaiChannel = {
                     typeof eff?.keywordBlacklist === "string"
                         ? eff.keywordBlacklist
                         : "播放音乐,放首歌,定闹钟,设闹钟,几点了,打开,关闭,音量",
+                deviceType: normalizeDeviceType(eff?.deviceType),
+                miiotTtsSiid: typeof eff?.miiotTtsSiid === "number" ? eff.miiotTtsSiid : undefined,
+                miiotTtsAiid: typeof eff?.miiotTtsAiid === "number" ? eff.miiotTtsAiid : undefined,
+                miiotStopSiid: typeof eff?.miiotStopSiid === "number" ? eff.miiotStopSiid : undefined,
+                miiotStopAiid: typeof eff?.miiotStopAiid === "number" ? eff.miiotStopAiid : undefined,
                 configured:
                     eff?.hasAccountSection === true &&
                     typeof eff?.passToken === "string" &&
@@ -721,6 +828,7 @@ const xiaoaiChannel = {
             hardware: account?.hardware || "LX04",
             did: account?.did || "[auto]",
             ttsEngine: account?.ttsEngine || "auto",
+            deviceType: account?.deviceType || "auto",
             startupVolume:
                 typeof account?.startupVolume === "number" ? account.startupVolume : "[keep]",
             pollInterval: account?.pollInterval ?? 1,
@@ -760,10 +868,11 @@ const xiaoaiChannel = {
             const systemVersion = getSystemVersion(deviceInfo);
             const miotDid = account.miotDid || deviceInfo?.miotDID;
             const miiot = await initMiIOT(account, miotDid);
+            const actionSpecs = resolveActionSpecs(account, deviceInfo);
             await ttsLongText(mina, text, undefined, miiot, {
                 systemVersion,
                 ttsEngine: account.ttsEngine,
-            });
+            }, actionSpecs);
             return { ok: true, channel: CHANNEL_ID };
         },
         sendMedia: async ({ cfg, accountId, text, mediaUrl }) => {
@@ -843,9 +952,28 @@ const xiaoaiChannel = {
                 );
             }
 
+            // Resolve device type and MiIOT action specs
+            const actionSpecs = resolveActionSpecs(account, deviceInfo);
+            if (actionSpecs.deviceType === "tv") {
+                ctx.log?.info?.(
+                    `[${ctx.accountId}] 设备类型: TV (小米电视) — MiNA play 已禁用，使用 MiIOT TTS`,
+                );
+                if (!miiot) {
+                    ctx.log?.warn?.(
+                        `[${ctx.accountId}] ⚠ TV 设备但 MiIOT 不可用，TTS 可能无法正常工作。` +
+                        `请检查 miotDid 配置或确保设备在线。`,
+                    );
+                }
+            } else {
+                ctx.log?.debug?.(
+                    `[${ctx.accountId}] 设备类型: ${actionSpecs.deviceType} (TTS: siid=${actionSpecs.tts.siid}/aiid=${actionSpecs.tts.aiid}, Stop: siid=${actionSpecs.stop.siid}/aiid=${actionSpecs.stop.aiid})`,
+                );
+            }
+
             const playbackOptions = {
                 systemVersion,
                 ttsEngine: normalizeTtsEngine(account.ttsEngine),
+                deviceType: actionSpecs.deviceType,
             };
 
             const startupVolume = normalizeStartupVolume(account.startupVolume);
@@ -933,7 +1061,7 @@ const xiaoaiChannel = {
                                     // Stop XiaoAi's own response
                                     if (account.stopXiaoaiResponse !== false) {
                                         ctx.log?.debug?.(`[${ctx.accountId}] 正在打断小爱自带回复...`);
-                                        await forceStopXiaoaiResponse(mina, miiot, ctx.log, playbackOptions);
+                                        await forceStopXiaoaiResponse(mina, miiot, ctx.log, playbackOptions, actionSpecs);
                                     }
 
                                     ctx.log?.info?.(
@@ -948,6 +1076,7 @@ const xiaoaiChannel = {
                                             actualQuery,
                                             { ...account, systemVersion },
                                             miiot,
+                                            actionSpecs,
                                         );
                                         const elapsed = ((Date.now() - startMs) / 1000).toFixed(1);
                                         ctx.log?.info?.(
@@ -973,7 +1102,7 @@ const xiaoaiChannel = {
                                         );
                                         // Inform user via TTS
                                         try {
-                                            await ttsPlay(mina, "抱歉，我现在无法回答，请稍后再试。", miiot, playbackOptions);
+                                            await ttsPlay(mina, "抱歉，我现在无法回答，请稍后再试。", miiot, playbackOptions, actionSpecs);
                                         } catch {
                                             // best effort
                                         }
@@ -1099,6 +1228,10 @@ function chooseTtsEngine(playbackOptions = {}, hasMiIOT = false) {
     if (override === "miot") return hasMiIOT ? "miot" : "mina";
     if (override === "mina") return "mina";
     if (!hasMiIOT) return "mina";
+
+    // TV devices should always prefer MiIOT (MiNA play doesn't work on TVs)
+    const deviceType = playbackOptions.deviceType;
+    if (deviceType === "tv") return "miot";
 
     const systemVersion = String(playbackOptions.systemVersion || "").trim();
     if (systemVersion && compareVersion(systemVersion, "2.90.0") < 0) {

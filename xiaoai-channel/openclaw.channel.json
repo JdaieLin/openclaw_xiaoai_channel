@@ -1,6 +1,6 @@
 {
   "name": "xiaoai",
   "displayName": "XiaoAi (小爱同学)",
-  "description": "小爱同学智能音箱桥接通道 — 用户对小爱说话，OpenClaw 回复通过 TTS 播报",
+  "description": "小爱同学智能音箱/电视桥接通道 — 用户对小爱说话，OpenClaw 回复通过 TTS 播报",
   "config": []
 }

@@ -151,11 +151,50 @@ function mergeMissingMiCredentials(store, backup) {
     return result;
 }
 
-function chooseTtsEngine({ systemVersion, hasMiIOT, overrideEngine }) {
+// ─── Device Type & Action Specs ─────────────────────────────
+
+const DEVICE_ACTION_SPECS = {
+    speaker: {
+        tts:  { siid: 5, aiid: 1 },
+        stop: { siid: 3, aiid: 2 },
+    },
+    tv: {
+        tts:  { siid: 5, aiid: 1 },
+        stop: { siid: 3, aiid: 2 },
+    },
+};
+
+const TV_HARDWARE_PATTERNS = [
+    /mitv/i, /mi\s*tv/i, /xiaomi\s*tv/i, /redmi\s*tv/i,
+    /mdz-/i, /^l\d+m\d+/i, /^e\d+[a-z]/i, /^p1\s/i,
+];
+
+function detectDeviceType(device) {
+    const hw = String(device?.hardware || device?.model || "").trim();
+    for (const pattern of TV_HARDWARE_PATTERNS) {
+        if (pattern.test(hw)) return "tv";
+    }
+    return "speaker";
+}
+
+function resolveActionSpecs(device) {
+    const deviceType = detectDeviceType(device);
+    const defaults = DEVICE_ACTION_SPECS[deviceType] || DEVICE_ACTION_SPECS.speaker;
+    return { deviceType, tts: { ...defaults.tts }, stop: { ...defaults.stop } };
+}
+
+function buildTtsActionParams(text, deviceType) {
+    return [{ text, type: 0 }];
+}
+
+function chooseTtsEngine({ systemVersion, hasMiIOT, overrideEngine, deviceType }) {
     const override = normalizeTtsEngine(overrideEngine);
     if (override === "miot") return hasMiIOT ? "miot" : "mina";
     if (override === "mina") return "mina";
     if (!hasMiIOT) return "mina";
+
+    // TV devices should always prefer MiIOT (MiNA play doesn't work on TVs)
+    if (deviceType === "tv") return "miot";
 
     // LX04 older firmware is usually more stable via MiNA first.
     if (systemVersion && compareVersion(systemVersion, "2.90.0") < 0) {
@@ -164,14 +203,16 @@ function chooseTtsEngine({ systemVersion, hasMiIOT, overrideEngine }) {
     return "miot";
 }
 
-async function playTTSWithFallback({ mina, miiot, text, systemVersion, overrideEngine }) {
+async function playTTSWithFallback({ mina, miiot, text, systemVersion, overrideEngine, actionSpecs }) {
     const normalizedText = normalizeTtsText(text);
     if (!normalizedText) return { ok: false, engine: "N/A" };
 
+    const specs = actionSpecs || resolveActionSpecs(null);
     const preferred = chooseTtsEngine({
         systemVersion,
         hasMiIOT: Boolean(miiot),
         overrideEngine,
+        deviceType: specs.deviceType,
     });
     const order = preferred === "miot" ? ["miot", "mina"] : ["mina", "miot"];
     let lastError = null;
@@ -180,13 +221,17 @@ async function playTTSWithFallback({ mina, miiot, text, systemVersion, overrideE
         if (engine === "miot") {
             if (!miiot) continue;
             try {
-                const ok = await miiot.doAction(5, 1, [{ text: normalizedText, type: 0 }]);
+                const params = buildTtsActionParams(normalizedText, specs.deviceType);
+                const ok = await miiot.doAction(specs.tts.siid, specs.tts.aiid, params);
                 if (ok) return { ok: true, engine: "MiIOT" };
             } catch (err) {
                 lastError = err;
             }
             continue;
         }
+
+        // MiNA play — not available for TV devices
+        if (specs.deviceType === "tv") continue;
 
         try {
             const ok = await mina.play({ tts: normalizedText });
@@ -389,9 +434,9 @@ async function cmdList(creds) {
     }
 
     console.log(`找到 ${devices.length} 个设备:\n`);
-    console.log("┌─────┬──────────────────────┬──────────────┬────────────┬──────────┬──────────────────┐");
-    console.log("│ #   │ 名称                 │ 型号         │ 系统版本   │ 状态     │ miotDID          │");
-    console.log("├─────┼──────────────────────┼──────────────┼────────────┼──────────┼──────────────────┤");
+    console.log("┌─────┬──────────────────────┬──────────────┬────────────┬──────────┬────────┬──────────────────┐");
+    console.log("│ #   │ 名称                 │ 型号         │ 系统版本   │ 状态     │ 类型   │ miotDID          │");
+    console.log("├─────┼──────────────────────┼──────────────┼────────────┼──────────┼────────┼──────────────────┤");
 
     for (let i = 0; i < devices.length; i++) {
         const d = devices[i];
@@ -400,15 +445,18 @@ async function cmdList(creds) {
         const hw = (d.hardware || d.model || "").padEnd(12).slice(0, 12);
         const sys = (getSystemVersion(d) || "未知").padEnd(10).slice(0, 10);
         const status = d.presence === "online" ? "🟢 在线 " : "🔴 离线 ";
+        const devType = detectDeviceType(d) === "tv" ? "📺 TV " : "🔊 音箱";
         const miotDid = (d.miotDID || "").padEnd(16).slice(0, 16);
-        console.log(`│ ${num} │ ${name} │ ${hw} │ ${sys} │ ${status} │ ${miotDid} │`);
+        console.log(`│ ${num} │ ${name} │ ${hw} │ ${sys} │ ${status} │ ${devType} │ ${miotDid} │`);
     }
-    console.log("└─────┴──────────────────────┴──────────────┴────────────┴──────────┴──────────────────┘");
+    console.log("└─────┴──────────────────────┴──────────────┴────────────┴──────────┴────────┴──────────────────┘");
 
     // Show the current connected device
     const cur = mina.account?.device;
     if (cur) {
+        const curDevType = detectDeviceType(cur);
         console.log(`\n当前连接的设备: ${cur.name || cur.alias || "未知"} (${cur.hardware || ""})`);
+        console.log(`  设备类型:    ${curDevType === "tv" ? "📺 小米电视" : "🔊 智能音箱"}`);
         console.log(`  deviceId:     ${cur.deviceID || cur.deviceId || ""}`);
         console.log(`  serialNumber: ${cur.serialNumber || ""}`);
         console.log(`  systemVersion:${getSystemVersion(cur) || "未知"}`);
@@ -431,7 +479,11 @@ async function cmdTTS(creds, text) {
     const mina = await createMiNA(creds);
     const device = mina.account?.device;
     const systemVersion = getSystemVersion(device);
+    const actionSpecs = resolveActionSpecs(device);
     console.log(`✓ 已连接: ${device?.name || "未知"} (${device?.hardware || ""})`);
+    if (actionSpecs.deviceType === "tv") {
+        console.log(`✓ 设备类型: 📺 小米电视`);
+    }
     if (systemVersion) {
         console.log(`✓ 系统版本: ${systemVersion}`);
     }
@@ -452,6 +504,7 @@ async function cmdTTS(creds, text) {
             text: normalizedText,
             systemVersion,
             overrideEngine: creds.ttsEngine,
+            actionSpecs,
         });
         console.log(result.ok ? `✅ TTS 播放成功 (via ${result.engine})` : "❌ TTS 播放失败");
     } catch (err) {
@@ -553,22 +606,24 @@ async function cmdPause(creds) {
     // Try MiIOT first
     const miotDid = device?.miotDID;
     const miiot = await createMiIOT(creds, miotDid);
+    const actionSpecs = resolveActionSpecs(device);
     const preferredEngine = chooseTtsEngine({
         systemVersion,
         hasMiIOT: Boolean(miiot),
         overrideEngine: creds.ttsEngine,
+        deviceType: actionSpecs.deviceType,
     });
 
     try {
         if (preferredEngine === "miot" && miiot) {
-            await miiot.doAction(3, 2, []);
+            await miiot.doAction(actionSpecs.stop.siid, actionSpecs.stop.aiid, []);
             console.log("✅ 已暂停播放 (via MiIOT)");
         } else {
             const success = await mina.pause();
             if (success) {
                 console.log("✅ 已暂停播放 (via MiNA)");
             } else if (miiot) {
-                await miiot.doAction(3, 2, []).catch(() => {});
+                await miiot.doAction(actionSpecs.stop.siid, actionSpecs.stop.aiid, []).catch(() => {});
                 console.log("⚠️  MiNA 暂停未确认，已补发 MiIOT stop");
             } else {
                 console.log("⚠️  暂停命令已发送（设备可能未在播放）");
@@ -590,7 +645,11 @@ async function cmdTestInterrupt(creds) {
     const mina = await createMiNA(creds);
     const device = mina.account?.device;
     const systemVersion = getSystemVersion(device);
+    const actionSpecs = resolveActionSpecs(device);
     console.log(`✓ 已连接: ${device?.name || "未知"} (${device?.hardware || ""})`);
+    if (actionSpecs.deviceType === "tv") {
+        console.log(`✓ 设备类型: 📺 小米电视`);
+    }
     if (systemVersion) {
         console.log(`✓ 系统版本: ${systemVersion}`);
     }
@@ -610,7 +669,8 @@ async function cmdTestInterrupt(creds) {
 
     console.log(`\n📢 Step 1: 播放长文本...`);
     if (miiot) {
-        await miiot.doAction(5, 1, [{ text: longText, type: 0 }]).catch(() => {});
+        const params = buildTtsActionParams(longText, actionSpecs.deviceType);
+        await miiot.doAction(actionSpecs.tts.siid, actionSpecs.tts.aiid, params).catch(() => {});
     } else {
         await mina.play({ tts: longText }).catch(() => {});
     }
@@ -628,18 +688,20 @@ async function cmdTestInterrupt(creds) {
         systemVersion,
         hasMiIOT: Boolean(miiot),
         overrideEngine: creds.ttsEngine,
+        deviceType: actionSpecs.deviceType,
     });
 
     if (preferredEngine === "miot" && miiot) {
         // Use MiIOT doAction to override the MiNA TTS (different audio pipeline)
-        console.log(`   使用 MiIOT doAction 覆盖 MiNA TTS...`);
-        await miiot.doAction(5, 1, [{ text: "，", type: 0 }]).catch(() => {});
+        console.log(`   使用 MiIOT doAction 覆盖 TTS...`);
+        const silentParams = buildTtsActionParams("，", actionSpecs.deviceType);
+        await miiot.doAction(actionSpecs.tts.siid, actionSpecs.tts.aiid, silentParams).catch(() => {});
         console.log(`   MiIOT 覆盖已发送 (${Date.now() - startMs}ms)`);
 
         // Brief pause then stop the comma TTS
         await sleep(200);
         console.log(`   发送 MiIOT stop...`);
-        await miiot.doAction(3, 2, []).catch(() => {});
+        await miiot.doAction(actionSpecs.stop.siid, actionSpecs.stop.aiid, []).catch(() => {});
         console.log(`   MiIOT stop 完成 (${Date.now() - startMs}ms)`);
     } else {
         // Strategy fallback for firmware where MiNA is preferred.
@@ -657,10 +719,12 @@ async function cmdTestInterrupt(creds) {
     // Step 4: Wait and play confirmation
     await sleep(800);
     console.log(`\n📢 Step 4: 播放确认消息...`);
+    const confirmText = "打断测试完成。如果你没有听到之前那段长文本的结尾，说明打断成功了。";
     if (preferredEngine === "miot" && miiot) {
-        await miiot.doAction(5, 1, [{ text: "打断测试完成。如果你没有听到之前那段长文本的结尾，说明打断成功了。", type: 0 }]).catch(() => {});
+        const params = buildTtsActionParams(confirmText, actionSpecs.deviceType);
+        await miiot.doAction(actionSpecs.tts.siid, actionSpecs.tts.aiid, params).catch(() => {});
     } else {
-        await mina.play({ tts: "打断测试完成。如果你没有听到之前那段长文本的结尾，说明打断成功了。" }).catch(() => {});
+        await mina.play({ tts: confirmText }).catch(() => {});
     }
     console.log(`✅ 测试完成\n`);
     console.log(`提示: 如果你仍然听到了长文本的全部内容，说明打断机制对此设备无效。`);

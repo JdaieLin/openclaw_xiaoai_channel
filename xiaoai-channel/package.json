@@ -14,9 +14,9 @@
     "channel": {
       "id": "xiaoai",
       "label": "XiaoAi",
-      "selectionLabel": "XiaoAi (小爱同学 Smart Speaker)",
+      "selectionLabel": "XiaoAi (小爱同学 Smart Speaker / TV)",
       "docsPath": "/channels/xiaoai",
-      "blurb": "小爱同学智能音箱桥接通道，通过小米云服务 API 实现语音对话转发。",
+      "blurb": "小爱同学智能音箱/电视桥接通道，通过小米云服务 API 实现语音对话转发。",
       "aliases": [
         "xiaoai",
         "xiaomi",
