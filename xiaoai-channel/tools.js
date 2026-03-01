@@ -23,6 +23,8 @@ import os from "node:os";
 import path from "node:path";
 import { MiNA, MiIOT, getMiNA, getMiIOT } from "mi-service-lite";
 
+const MI_CACHE_BACKUP_PATH = path.join(os.homedir(), ".openclaw", "xiaoai-mi-cache.json");
+
 // ─── Utilities ──────────────────────────────────────────────
 
 function sleep(ms) {
@@ -71,6 +73,84 @@ function normalizeTtsEngine(raw) {
     return "auto";
 }
 
+function normalizeTtsText(input) {
+    return String(input ?? "")
+        .replace(/\\r\\n|\\n|\\r/g, "，")
+        .replace(/\r\n|\n|\r/g, "，")
+        .replace(/\t+/g, "，")
+        .replace(/，{2,}/g, "，")
+        .replace(/\s{2,}/g, " ")
+        .trim();
+}
+
+function hasUsableMiCredentials(store) {
+    const mina = store?.mina || {};
+    const miiot = store?.miiot || {};
+    const minaUserId = mina.pass?.userId || mina.userId;
+    const minaPassword = mina.password;
+    const miiotUserId = miiot.pass?.userId || miiot.userId || minaUserId;
+    const miiotPassword = miiot.password || minaPassword;
+    return Boolean(minaUserId && minaPassword && miiotUserId && miiotPassword);
+}
+
+async function readMiCacheBackup() {
+    try {
+        const raw = await fs.readFile(MI_CACHE_BACKUP_PATH, "utf8");
+        return JSON.parse(raw) || {};
+    } catch {
+        return {};
+    }
+}
+
+async function writeMiCacheBackup(store) {
+    const payload = {
+        mina: {
+            userId: store?.mina?.userId || "",
+            password: store?.mina?.password || "",
+            did: store?.mina?.did || "",
+            pass: {
+                userId: store?.mina?.pass?.userId || "",
+                passToken: store?.mina?.pass?.passToken || "",
+            },
+        },
+        miiot: {
+            userId: store?.miiot?.userId || "",
+            password: store?.miiot?.password || "",
+            did: store?.miiot?.did || "",
+            pass: {
+                userId: store?.miiot?.pass?.userId || "",
+                passToken: store?.miiot?.pass?.passToken || "",
+            },
+        },
+    };
+    await fs.mkdir(path.dirname(MI_CACHE_BACKUP_PATH), { recursive: true });
+    await fs.writeFile(MI_CACHE_BACKUP_PATH, JSON.stringify(payload, null, 2), "utf8");
+}
+
+function mergeMissingMiCredentials(store, backup) {
+    const result = { ...store };
+    if (!result.mina) result.mina = {};
+    if (!result.mina.pass) result.mina.pass = {};
+    if (!result.miiot) result.miiot = {};
+    if (!result.miiot.pass) result.miiot.pass = {};
+
+    if (!result.mina.userId && backup?.mina?.userId) result.mina.userId = backup.mina.userId;
+    if (!result.mina.password && backup?.mina?.password) result.mina.password = backup.mina.password;
+    if (!result.mina.did && backup?.mina?.did) result.mina.did = backup.mina.did;
+    if (!result.mina.pass.userId && backup?.mina?.pass?.userId) {
+        result.mina.pass.userId = backup.mina.pass.userId;
+    }
+
+    if (!result.miiot.userId && backup?.miiot?.userId) result.miiot.userId = backup.miiot.userId;
+    if (!result.miiot.password && backup?.miiot?.password) result.miiot.password = backup.miiot.password;
+    if (!result.miiot.did && backup?.miiot?.did) result.miiot.did = backup.miiot.did;
+    if (!result.miiot.pass.userId && backup?.miiot?.pass?.userId) {
+        result.miiot.pass.userId = backup.miiot.pass.userId;
+    }
+
+    return result;
+}
+
 function chooseTtsEngine({ systemVersion, hasMiIOT, overrideEngine }) {
     const override = normalizeTtsEngine(overrideEngine);
     if (override === "miot") return hasMiIOT ? "miot" : "mina";
@@ -85,6 +165,9 @@ function chooseTtsEngine({ systemVersion, hasMiIOT, overrideEngine }) {
 }
 
 async function playTTSWithFallback({ mina, miiot, text, systemVersion, overrideEngine }) {
+    const normalizedText = normalizeTtsText(text);
+    if (!normalizedText) return { ok: false, engine: "N/A" };
+
     const preferred = chooseTtsEngine({
         systemVersion,
         hasMiIOT: Boolean(miiot),
@@ -97,7 +180,7 @@ async function playTTSWithFallback({ mina, miiot, text, systemVersion, overrideE
         if (engine === "miot") {
             if (!miiot) continue;
             try {
-                const ok = await miiot.doAction(5, 1, [{ text, type: 0 }]);
+                const ok = await miiot.doAction(5, 1, [{ text: normalizedText, type: 0 }]);
                 if (ok) return { ok: true, engine: "MiIOT" };
             } catch (err) {
                 lastError = err;
@@ -106,7 +189,7 @@ async function playTTSWithFallback({ mina, miiot, text, systemVersion, overrideE
         }
 
         try {
-            const ok = await mina.play({ tts: text });
+            const ok = await mina.play({ tts: normalizedText });
             if (ok !== false) return { ok: true, engine: "MiNA" };
         } catch (err) {
             lastError = err;
@@ -200,13 +283,21 @@ async function ensurePassToken(passToken) {
         // file doesn't exist yet
     }
 
+    let restoredCredentials = false;
+    if (!hasUsableMiCredentials(store)) {
+        const backup = await readMiCacheBackup();
+        const merged = mergeMissingMiCredentials(store, backup);
+        restoredCredentials = JSON.stringify(merged) !== JSON.stringify(store);
+        store = merged;
+    }
+
     const needsUpdate =
         !store.mina?.pass?.passToken ||
         store.mina.pass.passToken !== passToken ||
         !store.miiot?.pass?.passToken ||
         store.miiot.pass.passToken !== passToken;
 
-    if (needsUpdate) {
+    if (needsUpdate || restoredCredentials) {
         if (!store.mina) store.mina = {};
         if (!store.mina.pass) store.mina.pass = {};
         store.mina.pass.passToken = passToken;
@@ -216,6 +307,10 @@ async function ensurePassToken(passToken) {
         store.miiot.pass.passToken = passToken;
 
         await fs.writeFile(miJsonPath, JSON.stringify(store, null, 2), "utf8");
+    }
+
+    if (hasUsableMiCredentials(store)) {
+        await writeMiCacheBackup(store).catch(() => {});
     }
 
     // Return cached userId (phone number or numeric ID) for API calls
@@ -326,7 +421,8 @@ async function cmdList(creds) {
  * Play TTS text on the device.
  */
 async function cmdTTS(creds, text) {
-    if (!text) {
+    const normalizedText = normalizeTtsText(text);
+    if (!normalizedText) {
         console.error("❌ 请提供要播放的文本。示例: node tools.js tts \"你好世界\"");
         process.exit(1);
     }
@@ -347,13 +443,13 @@ async function cmdTTS(creds, text) {
         console.log(`✓ MiIOT 可用 (did=${miotDid})`);
     }
 
-    console.log(`\n📢 播放TTS: "${text}"\n`);
+    console.log(`\n📢 播放TTS: "${normalizedText}"\n`);
 
     try {
         const result = await playTTSWithFallback({
             mina,
             miiot,
-            text,
+            text: normalizedText,
             systemVersion,
             overrideEngine: creds.ttsEngine,
         });

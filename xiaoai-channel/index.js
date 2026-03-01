@@ -16,6 +16,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const CHANNEL_ID = "xiaoai";
+const MI_CACHE_BACKUP_PATH = path.join(os.homedir(), ".openclaw", "xiaoai-mi-cache.json");
 
 // ─── Plugin SDK Loader ──────────────────────────────────────
 
@@ -93,6 +94,74 @@ async function loadGetReplyFromConfig() {
 
 // ─── MiNA helpers ───────────────────────────────────────────
 
+function hasUsableMiCredentials(store) {
+    const mina = store?.mina || {};
+    const miiot = store?.miiot || {};
+    const minaUserId = mina.pass?.userId || mina.userId;
+    const minaPassword = mina.password;
+    const miiotUserId = miiot.pass?.userId || miiot.userId || minaUserId;
+    const miiotPassword = miiot.password || minaPassword;
+    return Boolean(minaUserId && minaPassword && miiotUserId && miiotPassword);
+}
+
+async function readMiCacheBackup() {
+    try {
+        const raw = await fs.readFile(MI_CACHE_BACKUP_PATH, "utf8");
+        return JSON.parse(raw) || {};
+    } catch {
+        return {};
+    }
+}
+
+async function writeMiCacheBackup(store) {
+    const payload = {
+        mina: {
+            userId: store?.mina?.userId || "",
+            password: store?.mina?.password || "",
+            did: store?.mina?.did || "",
+            pass: {
+                userId: store?.mina?.pass?.userId || "",
+                passToken: store?.mina?.pass?.passToken || "",
+            },
+        },
+        miiot: {
+            userId: store?.miiot?.userId || "",
+            password: store?.miiot?.password || "",
+            did: store?.miiot?.did || "",
+            pass: {
+                userId: store?.miiot?.pass?.userId || "",
+                passToken: store?.miiot?.pass?.passToken || "",
+            },
+        },
+    };
+    await fs.mkdir(path.dirname(MI_CACHE_BACKUP_PATH), { recursive: true });
+    await fs.writeFile(MI_CACHE_BACKUP_PATH, JSON.stringify(payload, null, 2), "utf8");
+}
+
+function mergeMissingMiCredentials(store, backup) {
+    const result = { ...store };
+    if (!result.mina) result.mina = {};
+    if (!result.mina.pass) result.mina.pass = {};
+    if (!result.miiot) result.miiot = {};
+    if (!result.miiot.pass) result.miiot.pass = {};
+
+    if (!result.mina.userId && backup?.mina?.userId) result.mina.userId = backup.mina.userId;
+    if (!result.mina.password && backup?.mina?.password) result.mina.password = backup.mina.password;
+    if (!result.mina.did && backup?.mina?.did) result.mina.did = backup.mina.did;
+    if (!result.mina.pass.userId && backup?.mina?.pass?.userId) {
+        result.mina.pass.userId = backup.mina.pass.userId;
+    }
+
+    if (!result.miiot.userId && backup?.miiot?.userId) result.miiot.userId = backup.miiot.userId;
+    if (!result.miiot.password && backup?.miiot?.password) result.miiot.password = backup.miiot.password;
+    if (!result.miiot.did && backup?.miiot?.did) result.miiot.did = backup.miiot.did;
+    if (!result.miiot.pass.userId && backup?.miiot?.pass?.userId) {
+        result.miiot.pass.userId = backup.miiot.pass.userId;
+    }
+
+    return result;
+}
+
 /**
  * Ensure .mi.json contains the passToken for authentication.
  * This is needed because mi-service-lite reads passToken from .mi.json
@@ -111,6 +180,14 @@ async function ensureMiJsonPassToken(account) {
     const passToken = account.passToken;
     if (!passToken) return store; // no passToken configured
 
+    let restoredCredentials = false;
+    if (!hasUsableMiCredentials(store)) {
+        const backup = await readMiCacheBackup();
+        const merged = mergeMissingMiCredentials(store, backup);
+        restoredCredentials = JSON.stringify(merged) !== JSON.stringify(store);
+        store = merged;
+    }
+
     // Only write passToken if the stored one is different or missing
     const needsUpdate = (
         !store.mina?.pass?.passToken ||
@@ -119,7 +196,7 @@ async function ensureMiJsonPassToken(account) {
         store.miiot.pass.passToken !== passToken
     );
 
-    if (needsUpdate) {
+    if (needsUpdate || restoredCredentials) {
         // Preserve existing store data, only update passToken
         if (!store.mina) store.mina = {};
         if (!store.mina.pass) store.mina.pass = {};
@@ -130,6 +207,10 @@ async function ensureMiJsonPassToken(account) {
         store.miiot.pass.passToken = passToken;
 
         await fs.writeFile(miJsonPath, JSON.stringify(store, null, 2), "utf8");
+    }
+
+    if (hasUsableMiCredentials(store)) {
+        await writeMiCacheBackup(store).catch(() => {});
     }
 
     return store;
@@ -228,6 +309,9 @@ async function getLastConversation(mina) {
  * Send TTS text via XiaoAi speaker.
  */
 async function ttsPlay(mina, text, miiot, playbackOptions = {}) {
+    const normalizedText = normalizeTtsText(text);
+    if (!normalizedText) return;
+
     const preferred = chooseTtsEngine(playbackOptions, Boolean(miiot));
     const order = preferred === "miot" ? ["miot", "mina"] : ["mina", "miot"];
     let lastError = null;
@@ -236,7 +320,7 @@ async function ttsPlay(mina, text, miiot, playbackOptions = {}) {
         if (engine === "miot") {
             if (!miiot) continue;
             try {
-                const ok = await miiot.doAction(5, 1, [{ text, type: 0 }]);
+                const ok = await miiot.doAction(5, 1, [{ text: normalizedText, type: 0 }]);
                 if (ok) return;
             } catch (err) {
                 lastError = err;
@@ -245,7 +329,7 @@ async function ttsPlay(mina, text, miiot, playbackOptions = {}) {
         }
 
         try {
-            const ok = await mina.play({ tts: text });
+            const ok = await mina.play({ tts: normalizedText });
             if (ok !== false) return;
         } catch (err) {
             lastError = err;
@@ -512,9 +596,9 @@ function normalizeReplyPayloads(payload) {
 }
 
 function payloadToReplyText(payload) {
-    const text = String(payload?.text ?? "").trim();
+    const text = normalizeTtsText(payload?.text ?? "");
     if (text) return text;
-    const mediaUrl = String(payload?.mediaUrl ?? "").trim();
+    const mediaUrl = normalizeTtsText(payload?.mediaUrl ?? "");
     if (mediaUrl) return mediaUrl;
     return "";
 }
@@ -989,4 +1073,14 @@ function chooseTtsEngine(playbackOptions = {}, hasMiIOT = false) {
         return "mina";
     }
     return "miot";
+}
+
+function normalizeTtsText(input) {
+    return String(input ?? "")
+        .replace(/\\r\\n|\\n|\\r/g, "，")
+        .replace(/\r\n|\n|\r/g, "，")
+        .replace(/\t+/g, "，")
+        .replace(/，{2,}/g, "，")
+        .replace(/\s{2,}/g, " ")
+        .trim();
 }
