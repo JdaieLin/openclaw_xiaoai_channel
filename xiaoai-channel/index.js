@@ -479,12 +479,14 @@ function resolveAccountSection(cfg, accountId) {
     // Account-level value takes priority over channel-level.
     const passToken = acct.passToken || section.passToken || "";
     const ttsEngine = acct.ttsEngine || section.ttsEngine || "auto";
+    const startupVolume = acct.startupVolume ?? section.startupVolume;
 
     return {
         enabled: section?.enabled !== false,
         ...acct,
         passToken,
         ttsEngine,
+        startupVolume,
         accountId: accountKey,
         hasAccountSection:
             Boolean(acct && typeof acct === "object" && Object.keys(acct).length > 0),
@@ -633,6 +635,7 @@ const xiaoaiChannel = {
                 // Shared passToken — inherited by all accounts, can be overridden per-account
                 passToken: { type: "string", description: "小米 passToken (所有设备共享，可在 account 中覆盖)" },
                 ttsEngine: { type: "string", description: "TTS引擎策略 auto|miot|mina (所有设备共享，可在 account 中覆盖)" },
+                startupVolume: { type: "number", description: "设备启用时自动设置音量 (0-100，留空则不调整)" },
                 accounts: {
                     type: "array",
                     items: {
@@ -644,6 +647,7 @@ const xiaoaiChannel = {
                             enabled: { type: "boolean" },
                             passToken: { type: "string", description: "小米 passToken (不填则继承顶层配置)" },
                             ttsEngine: { type: "string", description: "TTS引擎策略 auto|miot|mina" },
+                            startupVolume: { type: "number", description: "设备启用时自动设置音量 (0-100，留空则不调整)" },
                             hardware: { type: "string", description: "设备型号 (如 LX04)" },
                             did: { type: "string", description: "设备名称 (米家App中的名称，如'小爱触屏音箱')" },
                             miotDid: { type: "string", description: "MiIOT 设备 DID (通常自动获取，无需手动填写)" },
@@ -686,6 +690,7 @@ const xiaoaiChannel = {
                 did: typeof eff?.did === "string" ? eff.did : "",
                 miotDid: typeof eff?.miotDid === "string" ? eff.miotDid : "",
                 ttsEngine: normalizeTtsEngine(eff?.ttsEngine),
+                startupVolume: normalizeStartupVolume(eff?.startupVolume),
                 passToken: typeof eff?.passToken === "string" ? eff.passToken : "",
                 enableTrace: eff?.enableTrace === true,
                 pollInterval:
@@ -716,6 +721,8 @@ const xiaoaiChannel = {
             hardware: account?.hardware || "LX04",
             did: account?.did || "[auto]",
             ttsEngine: account?.ttsEngine || "auto",
+            startupVolume:
+                typeof account?.startupVolume === "number" ? account.startupVolume : "[keep]",
             pollInterval: account?.pollInterval ?? 1,
             triggerPrefix: account?.triggerPrefix || "[none]",
         }),
@@ -840,6 +847,31 @@ const xiaoaiChannel = {
                 systemVersion,
                 ttsEngine: normalizeTtsEngine(account.ttsEngine),
             };
+
+            const startupVolume = normalizeStartupVolume(account.startupVolume);
+            if (startupVolume !== null) {
+                try {
+                    const previous = await mina.getVolume().catch(() => undefined);
+                    const ok = await mina.setVolume(startupVolume);
+                    if (ok === false) {
+                        ctx.log?.warn?.(
+                            `[${ctx.accountId}] 音量自动调整失败: setVolume(${startupVolume}) 返回 false`,
+                        );
+                    } else {
+                        const prevLabel =
+                            typeof previous === "number" ? String(previous) : "unknown";
+                        ctx.log?.info?.(
+                            `[${ctx.accountId}] 已自动设置设备音量: ${prevLabel} → ${startupVolume}`,
+                        );
+                    }
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    ctx.log?.warn?.(
+                        `[${ctx.accountId}] 音量自动调整异常: ${msg}`,
+                    );
+                }
+            }
+
             ctx.log?.info?.(
                 `[${ctx.accountId}] TTS策略: ${chooseTtsEngine(playbackOptions, Boolean(miiot))} ` +
                 `(engine=${playbackOptions.ttsEngine}${systemVersion ? `, version=${systemVersion}` : ""})`,
@@ -1083,4 +1115,11 @@ function normalizeTtsText(input) {
         .replace(/，{2,}/g, "，")
         .replace(/\s{2,}/g, " ")
         .trim();
+}
+
+function normalizeStartupVolume(raw) {
+    if (raw === null || raw === undefined || raw === "") return null;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) return null;
+    return Math.max(0, Math.min(100, Math.round(value)));
 }

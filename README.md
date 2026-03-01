@@ -39,6 +39,7 @@ openclaw plugins install /path/to/openclaw_xiaoai_channel/xiaoai-channel
           "did": "小爱触屏音箱",          // 米家App中的设备名称（不是型号！）
           "passToken": "V1:xxx...",      // 从浏览器获取的 passToken
           "ttsEngine": "auto",           // 可按设备覆盖: auto|miot|mina
+          "startupVolume": 22,            // 启用该设备时自动设置音量(0-100)
           "pollInterval": 1,             // 轮询间隔（秒）
           "stopXiaoaiResponse": true,    // 是否打断小爱自带回复
           "keywordBlacklist": "播放音乐,放首歌,定闹钟,设闹钟,几点了,打开,关闭,音量"
@@ -79,6 +80,7 @@ openclaw plugins install /path/to/openclaw_xiaoai_channel/xiaoai-channel
 | `enabled` | boolean | true | 是否启用 |
 | `passToken` | string | — | 浏览器 passToken |
 | `ttsEngine` | string | auto | TTS 通道策略：`auto`/`miot`/`mina` |
+| `startupVolume` | number | — | 设备启用时自动设置音量（0-100） |
 | `did` | string | — | 设备名称（米家中显示的名称） |
 | `hardware` | string | LX04 | 设备型号（备用） |
 | `miotDid` | string | — | MiIOT 设备 DID（通常自动获取） |
